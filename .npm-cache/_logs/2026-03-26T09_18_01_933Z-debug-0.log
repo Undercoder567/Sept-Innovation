@@ -1,0 +1,76 @@
+0 verbose cli C:\Program Files\nodejs\node.exe C:\Users\Ujjawal kumar\AppData\Roaming\npm\node_modules\npm\bin\npm-cli.js
+1 info using npm@11.9.0
+2 info using node@v22.17.0
+3 silly config load:file:C:\Users\Ujjawal kumar\AppData\Roaming\npm\node_modules\npm\npmrc
+4 silly config load:file:E:\SeptInnovation\backend\.npmrc
+5 silly config load:file:C:\Users\Ujjawal kumar\.npmrc
+6 silly config load:file:C:\Users\Ujjawal kumar\AppData\Roaming\npm\etc\npmrc
+7 verbose title npm install
+8 verbose argv "install"
+9 verbose logfile logs-max:10 dir:e:\SeptInnovation\.npm-cache\_logs\2026-03-26T09_18_01_933Z-
+10 verbose logfile e:\SeptInnovation\.npm-cache\_logs\2026-03-26T09_18_01_933Z-debug-0.log
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:2197815296 maxSize:549453824 maxEntrySize:274726912
+13 verbose shrinkwrap failed to load node_modules/.package-lock.json out of date, updated: node_modules
+14 http fetch GET https://registry.npmjs.org/npm attempt 1 failed with EACCES
+15 verbose shrinkwrap failed to load node_modules/.package-lock.json out of date, updated: node_modules
+16 silly idealTree buildDeps
+17 silly fetch manifest mssql@^9.1.1
+18 silly packumentCache full:https://registry.npmjs.org/mssql cache-miss
+19 http fetch GET https://registry.npmjs.org/mssql attempt 1 failed with EACCES
+20 http fetch GET https://registry.npmjs.org/npm attempt 2 failed with EACCES
+21 http fetch GET https://registry.npmjs.org/mssql attempt 2 failed with EACCES
+22 http fetch GET https://registry.npmjs.org/npm attempt 3 failed with EACCES
+23 http fetch GET https://registry.npmjs.org/mssql attempt 3 failed with EACCES
+24 silly fetch manifest @types/mssql@^8.1.0
+25 silly packumentCache full:https://registry.npmjs.org/@types%2fmssql cache-miss
+26 http fetch GET https://registry.npmjs.org/@types%2fmssql attempt 1 failed with EACCES
+27 http fetch GET https://registry.npmjs.org/@types%2fmssql attempt 2 failed with EACCES
+28 http fetch GET https://registry.npmjs.org/@types%2fmssql attempt 3 failed with EACCES
+29 silly placeDep ROOT @types/mssql@ OK for: sept-innovation-backend@1.0.0 want: ^8.1.0
+30 silly placeDep ROOT mssql@ OK for: sept-innovation-backend@1.0.0 want: ^9.1.1
+31 silly fetch manifest fsevents@^2.3.2
+32 silly packumentCache full:https://registry.npmjs.org/fsevents cache-miss
+33 http fetch GET https://registry.npmjs.org/fsevents attempt 1 failed with EACCES
+34 http fetch GET https://registry.npmjs.org/fsevents attempt 2 failed with EACCES
+35 http fetch GET https://registry.npmjs.org/fsevents attempt 3 failed with EACCES
+36 silly placeDep node_modules/jest-haste-map fsevents@ OK for: jest-haste-map@29.7.0 want: ^2.3.2
+37 verbose type system
+38 verbose stack FetchError: request to https://registry.npmjs.org/@types%2fmssql failed, reason: 
+38 verbose stack     at ClientRequest.<anonymous> (C:\Users\Ujjawal kumar\AppData\Roaming\npm\node_modules\npm\node_modules\minipass-fetch\lib\index.js:130:14)
+38 verbose stack     at ClientRequest.emit (node:events:518:28)
+38 verbose stack     at emitErrorEvent (node:_http_client:104:11)
+38 verbose stack     at _destroy (node:_http_client:898:9)
+38 verbose stack     at onSocketNT (node:_http_client:918:5)
+38 verbose stack     at process.processTicksAndRejections (node:internal/process/task_queues:91:21)
+39 error code EACCES
+40 error errno EACCES
+41 error FetchError: request to https://registry.npmjs.org/@types%2fmssql failed, reason: 
+41 error     at ClientRequest.<anonymous> (C:\Users\Ujjawal kumar\AppData\Roaming\npm\node_modules\npm\node_modules\minipass-fetch\lib\index.js:130:14)
+41 error     at ClientRequest.emit (node:events:518:28)
+41 error     at emitErrorEvent (node:_http_client:104:11)
+41 error     at _destroy (node:_http_client:898:9)
+41 error     at onSocketNT (node:_http_client:918:5)
+41 error     at process.processTicksAndRejections (node:internal/process/task_queues:91:21) {
+41 error   code: 'EACCES',
+41 error   errno: 'EACCES',
+41 error   type: 'system',
+41 error   requiredBy: '.'
+41 error }
+42 error
+42 error The operation was rejected by your operating system.
+42 error It's possible that the file was already in use (by a text editor or antivirus),
+42 error or that you lack permissions to access it.
+42 error
+42 error If you believe this might be a permissions issue, please double-check the
+42 error permissions of the file and its containing directories, or try running
+42 error the command again as root/Administrator.
+43 silly unfinished npm timer reify 1774516682701
+44 silly unfinished npm timer reify:loadTrees 1774516682702
+45 verbose cwd E:\SeptInnovation\backend
+46 verbose os Windows_NT 10.0.26200
+47 verbose node v22.17.0
+48 verbose npm  v11.9.0
+49 verbose exit 1
+50 verbose code 1
+51 error A complete log of this run can be found in: e:\SeptInnovation\.npm-cache\_logs\2026-03-26T09_18_01_933Z-debug-0.log

@@ -1,0 +1,65 @@
+queryLimits:
+  # Global limits
+  global:
+    maxQueryTimeout: 30000 # 30 seconds
+    maxResultSize: 1000000 # 1MB
+    maxRecords: 10000
+    maxDailyQueries: 5000
+
+  # Per-role limits
+  byRole:
+    ADMIN:
+      queriesPerHour: 1000
+      maxExecutionTime: 60000
+      maxResultSize: 100000000
+
+    MANAGER:
+      queriesPerHour: 100
+      maxExecutionTime: 30000
+      maxResultSize: 5000000
+
+    ANALYST:
+      queriesPerHour: 150
+      maxExecutionTime: 45000
+      maxResultSize: 10000000
+
+    USER:
+      queriesPerHour: 10
+      maxExecutionTime: 15000
+      maxResultSize: 1000000
+
+  # Resource-specific limits
+  byResource:
+    large_tables:
+      maxRecords: 1000 # Prevent large aggregations
+      requiresApproval: false
+
+    sensitive_data:
+      maxRecords: 100
+      requiresApproval: true
+      requiresAuditLog: true
+
+rateLimit:
+  windowMs: 900000 # 15 minutes
+  maxRequestsPerWindow: 100
+  delayMs: 0
+  skipSuccessfulRequests: false
+
+caching:
+  enabled: true
+  ttl: 3600 # 1 hour
+  maxSize: 100 # max cached queries
+
+validation:
+  requireParameterization: true
+  preventSelectStar: true
+  requireLimitClause: true
+  maxJoinDepth: 5
+  allowedTablePatterns:
+    - "^(sales|customer|product|order)_.*"
+    - "^dim_.*"
+    - "^fact_.*"
+  blockedTablePatterns:
+    - "^system_.*"
+    - "^test_.*"
+    - "^temp_.*"

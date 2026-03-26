@@ -1,0 +1,100 @@
+{
+  "terms": {
+    "Revenue": {
+      "definition": "Total money received from sales",
+      "column": "amount",
+      "aggregation": "SUM",
+      "category": "financial"
+    },
+    "Cost of Goods Sold": {
+      "definition": "Direct costs of producing goods sold",
+      "column": "cogs",
+      "aggregation": "SUM",
+      "category": "financial"
+    },
+    "Profit Margin": {
+      "definition": "(Revenue - COGS) / Revenue * 100",
+      "calculation": "((SUM(amount) - SUM(cogs)) / SUM(amount)) * 100",
+      "category": "financial"
+    },
+    "Customer Acquisition Cost": {
+      "definition": "Total marketing spend / new customers acquired",
+      "column": "cac",
+      "aggregation": "AVG",
+      "category": "marketing"
+    },
+    "Customer Lifetime Value": {
+      "definition": "Average total profit from a customer relationship",
+      "column": "ltv",
+      "aggregation": "AVG",
+      "category": "customer"
+    },
+    "Churn Rate": {
+      "definition": "Percentage of customers lost in a period",
+      "calculation": "lost_customers / starting_customers * 100",
+      "category": "customer"
+    },
+    "Active User": {
+      "definition": "User with at least one action in last 30 days",
+      "filter": "last_action >= DATEADD(DAY, -30, GETDATE())",
+      "category": "usage"
+    },
+    "Monthly Recurring Revenue": {
+      "definition": "Predictable revenue from subscription customers",
+      "column": "mrr",
+      "aggregation": "SUM",
+      "category": "financial"
+    },
+    "Conversion Rate": {
+      "definition": "Visitors who complete desired action / total visitors",
+      "calculation": "conversions / visitors * 100",
+      "category": "marketing"
+    }
+  },
+  "intents": {
+    "TREND_ANALYSIS": {
+      "patterns": ["over time", "trend", "growth", "decline", "historical"],
+      "recommended_queries": ["Use date fields in GROUP BY", "Include ORDER BY date", "Consider moving average"]
+    },
+    "RANKING": {
+      "patterns": ["top", "bottom", "best", "worst", "rank"],
+      "recommended_queries": ["Use ORDER BY with TOP to cap rows", "Consider RANK() OVER()"]
+    },
+    "AGGREGATION": {
+      "patterns": ["total", "sum", "average", "count", "comparison"],
+      "recommended_queries": ["Use GROUP BY for dimensions", "Use aggregate functions"]
+    },
+    "FILTERING": {
+      "patterns": ["find", "where", "specific", "particular"],
+      "recommended_queries": ["Use WHERE clause with conditions"]
+    },
+    "COMPARISON": {
+      "patterns": ["vs", "versus", "compare", "different"],
+      "recommended_queries": ["Use multiple WHERE clauses", "Use UNION or JOIN"]
+    },
+    "FORECASTING": {
+      "patterns": ["predict", "forecast", "next", "future"],
+      "recommended_queries": ["Use historical data for analysis", "Consider exponential smoothing"]
+    },
+    "ANOMALY_DETECTION": {
+      "patterns": ["unusual", "abnormal", "outlier", "spike"],
+      "recommended_queries": ["Calculate z-scores", "Compare to moving average"]
+    }
+  },
+  "queryRules": [
+    "Always validate dates are within last 5 years",
+    "Exclude test records (is_test = false)",
+    "Use department_id for data isolation where applicable",
+    "Round currency values to 2 decimal places",
+    "Handle NULL values appropriately with COALESCE",
+    "Use time zone-aware date functions",
+    "Limit result sets to 10000 rows by default (use TOP or OFFSET/FETCH)",
+    "Use SET PARSEONLY or execution plans to validate complex queries"
+  ],
+  "dataTypes": {
+    "date_fields": ["created_at", "updated_at", "transaction_date", "order_date", "last_login", "date_of_birth"],
+    "currency_fields": ["amount", "revenue", "cost", "price", "balance"],
+    "percentage_fields": ["margin", "growth_rate", "churn_rate", "conversion_rate", "discount_percent"],
+    "identifier_fields": ["id", "customer_id", "product_id", "order_id", "user_id"]
+  }
+}

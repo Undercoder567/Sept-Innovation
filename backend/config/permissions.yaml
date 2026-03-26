@@ -1,0 +1,119 @@
+roles:
+  ADMIN:
+    name: Administrator
+    description: Full system access for DevOps and IT teams
+    permissions:
+      - 'analytics:query:*'
+      - 'analytics:export:*'
+      - 'security:audit:read'
+      - 'security:permissions:manage'
+      - 'system:config:read'
+      - 'system:config:write'
+    dataAccessLevel: FULL
+    queryLimit: 1000
+
+  MANAGER:
+    name: Department Manager
+    description: Manage team analytics and reports
+    permissions:
+      - 'analytics:query:read'
+      - 'analytics:export:read'
+      - 'analytics:insights:read'
+      - 'analytics:reports:create'
+    dataAccessLevel: DEPARTMENT
+    queryLimit: 100
+
+  ANALYST:
+    name: Data Analyst
+    description: Deep data analysis and exploration
+    permissions:
+      - 'analytics:query:read'
+      - 'analytics:export:read'
+      - 'analytics:insights:read'
+      - 'analytics:advanced:read'
+    dataAccessLevel: DEPARTMENT
+    queryLimit: 150
+
+  EXECUTIVE:
+    name: Executive
+    description: High-level dashboards and KPIs
+    permissions:
+      - 'analytics:query:limited'
+      - 'analytics:dashboards:read'
+      - 'analytics:export:read'
+    dataAccessLevel: DEPARTMENT
+    queryLimit: 20
+
+  USER:
+    name: User
+    description: Basic analytics access
+    permissions:
+      - 'analytics:query:limited'
+      - 'analytics:dashboards:read'
+    dataAccessLevel: PERSONAL
+    queryLimit: 10
+
+  GUEST:
+    name: Guest
+    description: Read-only access to shared reports
+    permissions:
+      - 'analytics:dashboards:public'
+    dataAccessLevel: NONE
+    queryLimit: 0
+
+resources:
+  'analytics:query':
+    name: Analytics Queries
+    requiredPermissions:
+      - 'analytics:query:read'
+    dataClassification: INTERNAL
+
+  'analytics:export':
+    name: Data Export
+    requiredPermissions:
+      - 'analytics:export:read'
+    dataClassification: CONFIDENTIAL
+
+  'analytics:advanced':
+    name: Advanced Analytics
+    requiredPermissions:
+      - 'analytics:advanced:read'
+    dataClassification: CONFIDENTIAL
+
+  'security:audit':
+    name: Audit Logs
+    requiredPermissions:
+      - 'security:audit:read'
+    dataClassification: RESTRICTED
+
+  'system:config':
+    name: System Configuration
+    requiredPermissions:
+      - 'system:config:read'
+    dataClassification: RESTRICTED
+
+dataClassifications:
+  PUBLIC:
+    description: Publicly available data
+    encryption: false
+    masking: false
+    auditLog: false
+
+  INTERNAL:
+    description: Internal company data
+    encryption: true
+    masking: false
+    auditLog: true
+
+  CONFIDENTIAL:
+    description: Sensitive business data
+    encryption: true
+    masking: true
+    auditLog: true
+
+  RESTRICTED:
+    description: Highly sensitive data - limited access
+    encryption: true
+    masking: true
+    auditLog: true
+    requiresMFA: true

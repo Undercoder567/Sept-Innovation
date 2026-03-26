@@ -1,0 +1,322 @@
+# ============================================================================
+# Ollama Configuration for Sept Innovation
+# Local LLM Engine - No External API Calls
+# ============================================================================
+
+server:
+  # Server configuration
+  host: "localhost"
+  port: 11434
+  timeout: 30000  # 30 seconds in milliseconds
+  retryAttempts: 3
+  retryDelay: 1000  # 1 second between retries
+  healthCheckInterval: 60000  # Check every 60 seconds
+
+models:
+  # Primary language model for SQL generation and insights
+  generation:
+    name: "llama2"
+    displayName: "Llama 2 (7B)"
+    version: "latest"
+    memory: "4GB"
+    description: "Main model for SQL generation, classification, and text analysis"
+    capabilities:
+      - sql_generation
+      - intent_classification
+      - data_interpretation
+      - insight_generation
+      - query_explanation
+    parameters:
+      temperature: 0.2  # Low temperature for deterministic SQL
+      topK: 40
+      topP: 0.9
+      numPredict: 512  # Max tokens for generation
+      numCtx: 4096  # Context window
+    systemPrompt: |
+      You are an expert SQL query generator for business analytics.
+      - Generate only syntactically correct PostgreSQL queries
+      - Always use parameterized queries with $1, $2, etc.
+      - Include table aliases for clarity
+      - Add helpful comments explaining the query logic
+      - Format queries for readability
+      - Never use SELECT * - specify columns explicitly
+
+  # Embedding model for semantic search and similarity
+  embeddings:
+    name: "nomic-embed-text"
+    displayName: "Nomic Embed Text"
+    version: "latest"
+    memory: "500MB"
+    description: "Semantic embeddings for similarity and retrieval"
+    capabilities:
+      - text_embedding
+      - semantic_search
+      - similarity_matching
+    parameters:
+      temperature: 0.0
+      numCtx: 2048
+    embeddingDimension: 768  # Output vector size
+
+  # Alternative smaller model for resource constraints
+  lightweight:
+    name: "mistral"
+    displayName: "Mistral (7B)"
+    version: "latest"
+    memory: "3GB"
+    enabled: false  # Enable if needed for lower resources
+    description: "Lightweight alternative for constrained environments"
+    parameters:
+      temperature: 0.3
+      topK: 40
+      topP: 0.9
+      numPredict: 256
+      numCtx: 2048
+
+pullPolicy:
+  # How to handle missing models
+  autoDownload: true
+  retryOnFailure: true
+  checkUpdates: true
+
+caching:
+  # Cache generation prompts and responses
+  enabled: true
+  ttl: 3600  # 1 hour in seconds
+  maxSize: 100  # Max cached responses
+  storage: "memory"  # Options: memory, disk, redis
+
+performance:
+  # Performance tuning
+  gpuAcceleration: false  # Set to true if CUDA available
+  numGPU: 0  # Number of GPU layers to use
+  numThread: 4  # CPU threads for inference
+  batchSize: 1  # Batch inference
+  preloadModels: ["llama2", "nomic-embed-text"]  # Models to preload on startup
+
+security:
+  # Security settings
+  apiKeyRequired: false  # No auth for local instance
+  corsEnabled: true
+  allowedOrigins:
+    - "http://localhost:3000"  # Frontend
+    - "http://localhost:5000"  # Python analytics engine
+    - "http://localhost:8000"  # Backend
+
+logging:
+  # Logging configuration
+  level: "info"  # Options: debug, info, warn, error
+  format: "json"
+  outputs:
+    - type: "file"
+      path: "./logs/ollama.log"
+      maxSize: "100MB"
+      maxBackups: 5
+    - type: "console"
+      pretty: true
+
+monitoring:
+  # Health and performance monitoring
+  enableMetrics: true
+  metricsPort: 9090
+  healthCheckPath: "/api/health"
+  metricsCollectionInterval: 60  # seconds
+  alertThresholds:
+    responseTime: 5000  # milliseconds
+    errorRate: 0.05  # 5%
+    memoryUsage: 0.85  # 85%
+
+# ============================================================================
+# MODEL INSTALLATION GUIDE
+# ============================================================================
+
+installation:
+  instructions: |
+    # Step 1: Install Ollama (if not already installed)
+    # Windows: Download from https://ollama.ai/download
+    # Linux: curl https://ollama.ai/install.sh | sh
+    # macOS: brew install ollama
+
+    # Step 2: Start Ollama server in background
+    ollama serve
+
+    # Step 3: Pull the required models
+    ollama pull llama2
+    ollama pull nomic-embed-text
+    
+    # Step 4: Verify installation
+    curl http://localhost:11434/api/tags
+    
+    # Step 5: Test model responsiveness
+    curl http://localhost:11434/api/generate \
+      -d '{"model":"llama2","prompt":"Hello","stream":false}'
+
+  models:
+    - name: "llama2"
+      size: "3.8GB"
+      pullCommand: "ollama pull llama2"
+      testCommand: |
+        curl http://localhost:11434/api/generate \
+          -d '{"model":"llama2","prompt":"SELECT","stream":false}'
+      performance:
+        responseTime: "2-5 seconds"
+        memoryUsage: "4GB"
+
+    - name: "nomic-embed-text"
+      size: "274MB"
+      pullCommand: "ollama pull nomic-embed-text"
+      testCommand: |
+        curl http://localhost:11434/api/embeddings \
+          -d '{"model":"nomic-embed-text","prompt":"test"}'
+      performance:
+        responseTime: "100-200ms"
+        memoryUsage: "500MB"
+
+# ============================================================================
+# PROMPT TEMPLATES
+# ============================================================================
+
+prompts:
+  sqlGeneration:
+    template: |
+      You are an expert SQL query generator. Generate a PostgreSQL query based on:
+      
+      User Intent: {intent}
+      User Query: {query}
+      Database Schema:
+      {schema}
+      
+      Business Context:
+      {businessContext}
+      
+      Requirements:
+      1. Use parameterized queries ($1, $2, ...)
+      2. Include table aliases
+      3. Add comments explaining the logic
+      4. Format for readability
+      5. Specify columns (no SELECT *)
+      
+      Generated Query:
+    maxTokens: 512
+    temperature: 0.2
+
+  intentClassification:
+    template: |
+      Classify the analytical intent of this query:
+      "{query}"
+      
+      Options: TREND, COMPARISON, AGGREGATION, TOP_BOTTOM, COMPOSITION, RANKING, ANOMALY, FORECAST
+      
+      Respond with: INTENT: [choice]
+    maxTokens: 50
+    temperature: 0.0
+
+  dataInterpretation:
+    template: |
+      Interpret these query results in business terms:
+      
+      Query: {query}
+      Sample Results:
+      {results}
+      
+      Provide a brief business insight (2-3 sentences).
+    maxTokens: 200
+    temperature: 0.7
+
+  insightGeneration:
+    template: |
+      Generate a business insight from this analysis:
+      
+      Metric: {metric}
+      Value: {value}
+      Trend: {trend}
+      Context: {context}
+      
+      Insight:
+    maxTokens: 150
+    temperature: 0.6
+
+# ============================================================================
+# ENVIRONMENT VARIABLES (Reference)
+# ============================================================================
+
+environmentVariables:
+  OLLAMA_HOST: "http://localhost:11434"
+  OLLAMA_MODEL_GENERATION: "llama2"
+  OLLAMA_MODEL_EMBEDDINGS: "nomic-embed-text"
+  OLLAMA_TIMEOUT: "30"
+  OLLAMA_RETRY_ATTEMPTS: "3"
+  OLLAMA_GPU_ACCELERATION: "false"
+  OLLAMA_NUM_THREADS: "4"
+  OLLAMA_LOG_LEVEL: "info"
+
+# ============================================================================
+# DEVELOPMENT vs PRODUCTION
+# ============================================================================
+
+environments:
+  development:
+    models:
+      - "llama2"
+      - "nomic-embed-text"
+    caching:
+      enabled: true
+      ttl: 300  # 5 minutes
+    logging:
+      level: "debug"
+    monitoring:
+      enableMetrics: true
+
+  production:
+    models:
+      - "llama2"
+      - "nomic-embed-text"
+    caching:
+      enabled: true
+      ttl: 3600  # 1 hour
+    logging:
+      level: "warn"
+    monitoring:
+      enableMetrics: true
+      alertThresholds:
+        responseTime: 3000  # Stricter in production
+        errorRate: 0.01
+        memoryUsage: 0.80
+
+# ============================================================================
+# TROUBLESHOOTING
+# ============================================================================
+
+troubleshooting:
+  noConnection:
+    problem: "Cannot connect to Ollama server"
+    solutions:
+      - "Check if Ollama is running: curl http://localhost:11434/api/health"
+      - "Verify port 11434 is not blocked by firewall"
+      - "Check OLLAMA_HOST environment variable"
+      - "Restart Ollama server: ollama serve"
+
+  slowResponse:
+    problem: "Model responses are slow"
+    solutions:
+      - "Check system resources (CPU/RAM)"
+      - "Reduce numPredict (fewer output tokens)"
+      - "Enable GPU acceleration if available"
+      - "Reduce temperature for faster deterministic responses"
+      - "Check if other processes are consuming resources"
+
+  outOfMemory:
+    problem: "Out of memory errors"
+    solutions:
+      - "Use lightweight model instead of llama2"
+      - "Reduce numCtx (context window size)"
+      - "Enable model unloading: keep_alive: 0"
+      - "Restart Ollama to clear cache"
+
+  poorQualitySQL:
+    problem: "Generated SQL is incorrect or inefficient"
+    solutions:
+      - "Review systemPrompt - make it more specific"
+      - "Lower temperature (more deterministic)"
+      - "Add more context to prompt (schema, examples)"
+      - "Use numPredict: 256 to limit output length"
+      - "Include validation in sqlValidator.ts"

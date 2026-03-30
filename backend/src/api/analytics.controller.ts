@@ -11,8 +11,156 @@ import { SQLValidator, ValidationIssue } from '../sql/sqlValidator';
 import { PIIMasker } from '../security/piiMasker';
 import { checkPermission, checkDataAccess, requirePermission } from '../security/rbac';
 import { AuditLogger } from '../logs/auditLogger';
+import { TableTranslation, tableTranslations } from '../semantic/tableTranslations';
 
 const router = Router();
+const englishToGermanTableMap: Map<string, string> = new Map();
+const germanToTranslation: Map<string, TableTranslation> = new Map();
+
+function addAliasVariant(alias: string, target: string) {
+  const normalized = alias.toLowerCase();
+  englishToGermanTableMap.set(normalized, target);
+  if (normalized.endsWith('s')) {
+    englishToGermanTableMap.set(normalized.slice(0, -1), target);
+  } else {
+    englishToGermanTableMap.set(`${normalized}s`, target);
+  }
+}
+
+tableTranslations.forEach((entry) => {
+  const target = entry.germanName.toLowerCase();
+  if (entry.englishAlias) {
+    addAliasVariant(entry.englishAlias, target);
+  }
+  entry.additionalAliases?.forEach((alias) => {
+    addAliasVariant(alias, target);
+  });
+  germanToTranslation.set(target, entry);
+});
+
+const translationOrder = Array.from(englishToGermanTableMap.keys()).sort((a, b) => b.length - a.length);
+
+function escapeForRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function translateTableNames(sql: string): string {
+  if (!sql) return sql;
+  let translated = sql;
+  for (const alias of translationOrder) {
+    const germanName = englishToGermanTableMap.get(alias);
+    if (!germanName) continue;
+    const pattern = new RegExp(`\\b${escapeForRegExp(alias)}\\b`, 'gi');
+    translated = translated.replace(pattern, germanName);
+  }
+  return translated;
+}
+
+async function describeTable(tableName: string): Promise<string> {
+  try {
+    const columns = await dbClient.getRows<{
+      column_name: string;
+      data_type: string;
+      character_maximum_length: number | null;
+    }>(`
+      SELECT column_name, data_type, character_maximum_length
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE table_schema = 'dbo'
+        AND LOWER(table_name) = $1
+      ORDER BY ordinal_position;
+    `, [tableName.toLowerCase()]);
+
+    if (columns.length === 0) {
+      return `Table: ${tableName} (no column metadata)`;
+    }
+
+    const columnDescs = columns
+      .slice(0, 12)
+      .map(col => {
+        const length = col.character_maximum_length;
+        const lenSuffix = length && length > 0 ? `(${length})` : '';
+        return `${col.column_name} ${col.data_type}${lenSuffix}`;
+      })
+      .join(', ');
+
+    return `Table: ${tableName} | Columns: ${columnDescs}`;
+  } catch (error) {
+    return `Table: ${tableName} (schema unavailable)`;
+  }
+}
+
+function detectMentionedTables(query: string): string[] {
+  const normalized = query.toLowerCase();
+  const detected = new Set<string>();
+
+  for (const entry of tableTranslations) {
+    if (!entry.germanName) continue;
+    const german = entry.germanName.toLowerCase();
+    if (normalized.includes(german)) {
+      detected.add(german);
+      continue;
+    }
+
+    const aliasCandidates = [entry.englishAlias, ...(entry.additionalAliases || [])]
+      .filter(Boolean)
+      .flatMap((alias) => {
+        const normalizedAlias = alias!.toLowerCase();
+        const variants = normalizedAlias.endsWith('s')
+          ? [normalizedAlias, normalizedAlias.slice(0, -1)]
+          : [normalizedAlias, `${normalizedAlias}s`];
+        return variants;
+      });
+
+    for (const alias of aliasCandidates) {
+      const pattern = new RegExp(`\\b${escapeForRegExp(alias)}\\b`, 'i');
+      if (pattern.test(normalized)) {
+        detected.add(german);
+        break;
+      }
+    }
+  }
+
+  if (detected.size === 0) {
+    return ['kunde', 'auftrag', 'waren']; // fallback defaults
+  }
+
+  return Array.from(detected);
+}
+
+function filterSchemaByTableNames(schema: string, tableNames: string[]): string {
+  if (!schema || tableNames.length === 0) {
+    return schema;
+  }
+
+  const normalizedTargets = tableNames.map((t) => t.toLowerCase());
+  const parts = schema
+    .split(/(?=CREATE\s+TABLE)/i)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const filtered = parts.filter((part) =>
+    normalizedTargets.some((name) => part.toLowerCase().includes(`[${name}]`) || part.toLowerCase().includes(` ${name}`))
+  );
+
+  return filtered.length > 0 ? filtered.join('\n\n') : schema;
+}
+
+function getRelevantTranslations(tableNames: string[]): TableTranslation[] {
+  const normalized = new Set(tableNames.map((name) => name.toLowerCase()));
+  return tableTranslations.filter((entry) => normalized.has(entry.germanName.toLowerCase()));
+}
+
+async function getSchemaContextForQuery(
+  req: Request,
+  userQuery: string
+): Promise<{ schema: string; tables: string[] }> {
+  const tableNames = detectMentionedTables(userQuery);
+  const summaries = await Promise.all(tableNames.map(describeTable));
+  return {
+    schema: summaries.join('\n'),
+    tables: tableNames,
+  };
+}
 dotenv.config();
 
 // Initialize services
@@ -32,6 +180,14 @@ const dbClient = new DatabaseClient({
   encrypt: process.env.DB_ENCRYPT === 'true',
   trustServerCertificate: process.env.DB_TRUST_SERVER_CERT === 'true',
 });
+export const analyticsSchemaReady = dbClient.ensureAnalyticsSchema()
+  .then(() => {
+    console.log('Analytics helper tables ensured');
+  })
+  .catch(err => {
+    console.error('Failed to ensure analytics helper tables', err);
+    throw err;
+  });
 
 // Query schema validation
 const querySchema = Joi.object({
@@ -44,6 +200,8 @@ const querySchema = Joi.object({
 const QUERY_CACHE_TTL_SECONDS = parseInt(process.env.QUERY_CACHE_TTL_SECONDS || '300', 10);
 const VALIDATED_SQL_TTL_MS = parseInt(process.env.VALIDATED_SQL_TTL_MS || '180000', 10);
 const SCHEMA_CACHE_TTL_MS = parseInt(process.env.SCHEMA_CACHE_TTL_MS || '60000', 10);
+const DEFAULT_TOP_LIMIT = parseInt(process.env.DEFAULT_TOP_LIMIT || '100', 10);
+const FORCE_LLM_ONLY = (process.env.FORCE_LLM_ONLY || process.env.FORCE_LLM || 'true').toLowerCase() === 'true';
 
 const validatedSqlCache = new Map<string, { sql: string; expiresAt: number }>();
 let schemaCache: { schema: string; expiresAt: number } = { schema: '', expiresAt: 0 };
@@ -95,6 +253,192 @@ return res.status(500).json({
 });
 
 
+router.get('/table-usage', requirePermission('analytics:query:read'), async (req: Request, res: Response) => {
+  try {
+    const rows = await dbClient.getRows<{ name: string; row_count: number }>(`
+      SELECT TOP 50
+        t.name,
+        SUM(p.rows) AS row_count
+      FROM sys.tables t
+      JOIN sys.partitions p ON p.object_id = t.object_id
+      WHERE p.index_id IN (0, 1)
+      GROUP BY t.name
+      ORDER BY SUM(p.rows) DESC;
+    `);
+
+    const translations = tableTranslations.reduce<Record<string, string>>((acc, entry) => {
+      acc[entry.germanName.toLowerCase()] = entry.englishAlias;
+      return acc;
+    }, {});
+
+    const payload = rows.map((row) => ({
+      name: row.name,
+      englishAlias: translations[row.name.toLowerCase()] || '',
+      rowCount: Number(row.row_count ?? 0),
+    }));
+
+    res.status(200).json({ success: true, data: payload });
+  } catch (error) {
+    console.error('Table usage fetch failed', error);
+    res.status(500).json({
+      success: false,
+      error: 'TABLE_USAGE_ERROR',
+      message: (error as Error).message,
+    });
+  }
+});
+
+
+router.get('/table-relationships', requirePermission('analytics:query:read'), async (req: Request, res: Response) => {
+  try {
+    const fkRows = await dbClient.getRows<{
+      constraintName: string;
+      parentTable: string;
+      referencedTable: string;
+      parentColumns: string;
+      referencedColumns: string;
+      onDelete: string;
+      onUpdate: string;
+    }>(`
+      SELECT
+        fk.name AS constraintName,
+        parentTab.name AS parentTable,
+        referencedTab.name AS referencedTable,
+        fk.delete_referential_action_desc AS onDelete,
+        fk.update_referential_action_desc AS onUpdate,
+        STRING_AGG(parentCol.name, ', ') AS parentColumns,
+        STRING_AGG(refCol.name, ', ') AS referencedColumns
+      FROM sys.foreign_keys fk
+      INNER JOIN sys.tables parentTab ON fk.parent_object_id = parentTab.object_id
+      INNER JOIN sys.tables referencedTab ON fk.referenced_object_id = referencedTab.object_id
+      INNER JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+      INNER JOIN sys.columns parentCol ON parentCol.object_id = parentTab.object_id AND parentCol.column_id = fkc.parent_column_id
+      INNER JOIN sys.columns refCol ON refCol.object_id = referencedTab.object_id AND refCol.column_id = fkc.referenced_column_id
+      GROUP BY fk.name, parentTab.name, referencedTab.name, fk.delete_referential_action_desc, fk.update_referential_action_desc
+      ORDER BY fk.name;
+    `);
+
+    const nodeMap = new Map<string, { id: string; name: string; englishAlias: string }>();
+    const edgeKeySet = new Set<string>();
+    const edges: Array<{
+      id: string;
+      source: string;
+      target: string;
+      parentColumns: string;
+      referencedColumns: string;
+      onDelete: string;
+      onUpdate: string;
+      type: 'fk' | 'inferred';
+      inferredReason?: string;
+    }> = [];
+
+    const ensureNode = (tableName: string) => {
+      const normalized = tableName.toLowerCase();
+      if (!nodeMap.has(normalized)) {
+        const translation = germanToTranslation.get(normalized);
+        nodeMap.set(normalized, {
+          id: normalized,
+          name: tableName,
+          englishAlias: translation?.englishAlias || translation?.germanName || tableName,
+        });
+      }
+    };
+
+    fkRows.forEach((row) => {
+      const parentKey = row.parentTable.toLowerCase();
+      const referencedKey = row.referencedTable.toLowerCase();
+      ensureNode(row.parentTable);
+      ensureNode(row.referencedTable);
+      const key = `${parentKey}-${referencedKey}-${row.parentColumns}`;
+      edgeKeySet.add(key);
+      edges.push({
+        id: `${row.constraintName}_${parentKey}_${referencedKey}`,
+        source: parentKey,
+        target: referencedKey,
+        parentColumns: row.parentColumns,
+        referencedColumns: row.referencedColumns,
+        onDelete: row.onDelete,
+        onUpdate: row.onUpdate,
+        type: 'fk',
+      });
+    });
+
+    const keyColumnRows = await dbClient.getRows<{
+      tableName: string;
+      columnName: string;
+      isKey: number;
+    }>(`
+      SELECT
+        kcu.TABLE_NAME AS tableName,
+        kcu.COLUMN_NAME AS columnName,
+        CASE WHEN tc.CONSTRAINT_TYPE IN ('PRIMARY KEY', 'UNIQUE') THEN 1 ELSE 0 END AS isKey
+      FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+      JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+        ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+        AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
+      WHERE kcu.TABLE_SCHEMA = 'dbo'
+        AND tc.CONSTRAINT_TYPE IN ('PRIMARY KEY', 'UNIQUE');
+    `);
+
+    const columnTableMap = new Map<string, { table: string; isKey: boolean }[]>();
+    keyColumnRows.forEach((row) => {
+      const key = row.columnName.toLowerCase();
+      const entries = columnTableMap.get(key) || [];
+      entries.push({
+        table: row.tableName.toLowerCase(),
+        isKey: Boolean(row.isKey),
+      });
+      columnTableMap.set(key, entries);
+    });
+
+    columnTableMap.forEach((entries, column) => {
+      if (entries.length < 2) return;
+      entries.forEach((entry) => ensureNode(entry.table));
+      const keyTables = entries.filter((entry) => entry.isKey);
+      const otherTables = entries.filter((entry) => !entry.isKey);
+
+      const children = otherTables.length > 0 ? otherTables : entries;
+      const parents = keyTables.length > 0 ? keyTables : entries;
+
+      children.forEach((child) => {
+        parents.forEach((parent) => {
+          if (child.table === parent.table) return;
+          const edgeKey = `${child.table}-${parent.table}-${column}`;
+          if (edgeKeySet.has(edgeKey)) return;
+          edgeKeySet.add(edgeKey);
+          edges.push({
+            id: `inferred_${column}_${child.table}_${parent.table}`,
+            source: child.table,
+            target: parent.table,
+            parentColumns: column,
+            referencedColumns: column,
+            onDelete: 'INFERRED',
+            onUpdate: 'INFERRED',
+            type: 'inferred',
+            inferredReason: `Shared key column ${column}`,
+          });
+        });
+      });
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        nodes: Array.from(nodeMap.values()),
+        edges,
+      },
+    });
+  } catch (error) {
+    console.error('Table relationships fetch failed', error);
+    res.status(500).json({
+      success: false,
+      error: 'TABLE_RELATIONSHIP_ERROR',
+      message: (error as Error).message,
+    });
+  }
+});
+
+
 function buildSchemaIssue(error: unknown) {
   return {
     type: 'ERROR' as const,
@@ -107,7 +451,8 @@ function buildSchemaIssue(error: unknown) {
 async function validateGeneratedSQL(sql: string): Promise<ValidationIssue[]> {
   const issues = sqlValidator.validate(sql);
   try {
-    await dbClient.explainQuery(sql);
+    const sanitized = translateTableNames(sql.replace(/\$\d+/g, 'NULL'));
+    await dbClient.explainQuery(sanitized);
   } catch (explainError) {
     issues.push(buildSchemaIssue(explainError));
   }
@@ -118,16 +463,42 @@ function toIssueStrings(issues: ValidationIssue[]): string[] {
   return issues.map(issue => `${issue.code}: ${issue.message}`);
 }
 
-async function generateBestSQL(userQuery: string, dbSchema: string): Promise<{ sql: string; issues: ValidationIssue[] }> {
+function ensureTopLimit(sql: string, limit = DEFAULT_TOP_LIMIT): string {
+  const trimmed = sql.trim();
+  if (!/^select\b/i.test(trimmed)) {
+    return sql;
+  }
+
+  if (/\boffset\s+\d+\s+rows\b/i.test(trimmed) || /\btop\s+\d+/i.test(trimmed)) {
+    return sql;
+  }
+
+  const selectRegex = /^(\s*select\s+)(distinct\s+)?/i;
+  if (!selectRegex.test(sql)) {
+    return sql;
+  }
+
+  return sql.replace(selectRegex, (match, selectPart, distinctPart = '') => {
+    return `${selectPart}${distinctPart}TOP ${limit} `;
+  });
+}
+
+async function generateBestSQL(
+  userQuery: string,
+  dbSchema: string,
+  translationHints: TableTranslation[] = []
+): Promise<{ sql: string; issues: ValidationIssue[] }> {
   const MAX_ATTEMPTS = 3;
   let candidate = '';
   let issues: ValidationIssue[] = [];
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     if (attempt === 1) {
-      const prompt = promptBuilder.buildSQLGenerationPrompt(userQuery, dbSchema);
+      const prompt = promptBuilder.buildSQLGenerationPrompt(userQuery, dbSchema, {
+        translationHints,
+      });
       const raw = await llmClient.generate(prompt, { temperature: 0.15 });
-      candidate = extractSqlStatement(raw);
+      candidate = ensureTopLimit(extractSqlStatement(raw));
     } else {
       const repairPrompt = promptBuilder.buildSQLRepairPrompt(
         userQuery,
@@ -136,7 +507,7 @@ async function generateBestSQL(userQuery: string, dbSchema: string): Promise<{ s
         toIssueStrings(issues)
       );
       const raw = await llmClient.generate(repairPrompt, { temperature: 0.05 });
-      candidate = extractSqlStatement(raw);
+      candidate = ensureTopLimit(extractSqlStatement(raw));
     }
 
     issues = await validateGeneratedSQL(candidate);
@@ -184,6 +555,171 @@ async function getSchemaContextForRequest(req: Request): Promise<string> {
     reqAny._schemaContextPromise = getSchemaContextCached();
   }
   return reqAny._schemaContextPromise;
+}
+
+async function attemptSimpleOrderQuery(
+  userQuery: string,
+  limit: number,
+  offset: number
+): Promise<{ rows: any[]; generatedSQL: string } | null> {
+  const patterns = [
+    /find all orders of\s+(.+)/i,
+    /show me all orders of\s+(.+)/i,
+    /all orders for\s+(.+)/i,
+    /orders of\s+(.+)/i,
+  ];
+
+  let match: RegExpMatchArray | null = null;
+  for (const pattern of patterns) {
+    match = userQuery.match(pattern);
+    if (match) break;
+  }
+
+  if (!match) {
+    return null;
+  }
+
+  const customer = match[1].trim().replace(/[?.!]$/, '');
+  const yearMatch = userQuery.match(/(19|20)\d{2}/);
+  const yearFilter = yearMatch ? parseInt(yearMatch[0], 10) : null;
+  const sql = `
+    SELECT
+      a.Nummer,
+      a.Datum,
+      a.Name,
+      a.Kundennumm
+    FROM auftrag a
+    JOIN kunde k ON a.Kundennumm = k.Kundennumm
+    WHERE k.Name LIKE $1
+    ${yearFilter ? 'AND YEAR(a.Datum) = $4' : ''}
+    ORDER BY a.Datum DESC
+    OFFSET $2 ROWS FETCH NEXT $3 ROWS ONLY;
+  `;
+
+  const params = yearFilter
+    ? [`%${customer}%`, offset, limit, yearFilter]
+    : [`%${customer}%`, offset, limit];
+  const result = await dbClient.query(sql, params);
+  return { rows: result.rows, generatedSQL: sql };
+}
+
+async function attemptSimpleCompanyListQuery(
+  userQuery: string,
+  limit: number,
+  offset: number
+): Promise<{ rows: any[]; generatedSQL: string } | null> {
+  const normalized = userQuery.toLowerCase();
+  if (!/(list|show|give me|get|display|all).*(companies|clients|customers?)/.test(normalized)) {
+    return null;
+  }
+
+  const sql = `
+    SELECT
+      k.Name,
+      k.Kundennumm,
+      k.Land,
+      k.Ort
+    FROM kunde k
+    ORDER BY k.Name ASC
+    OFFSET $1 ROWS FETCH NEXT $2 ROWS ONLY;
+  `;
+
+  const result = await dbClient.query(sql, [offset, limit]);
+  return { rows: result.rows, generatedSQL: sql };
+}
+
+async function attemptSimpleCustomerNamesQuery(
+  userQuery: string,
+  limit: number,
+  offset: number
+): Promise<{ rows: any[]; generatedSQL: string } | null> {
+  const normalized = userQuery.toLowerCase();
+  if (
+    !(
+      /(name[s]?|list).*(customers?|clients)/.test(normalized) ||
+      /(customers?|clients).*(name[s]?|list)/.test(normalized)
+    )
+  ) {
+    return null;
+  }
+
+  const sql = `
+    SELECT
+      k.Name
+    FROM kunde k
+    ORDER BY k.Name ASC
+    OFFSET $1 ROWS FETCH NEXT $2 ROWS ONLY;
+  `;
+
+  const result = await dbClient.query(sql, [offset, limit]);
+  return { rows: result.rows, generatedSQL: sql };
+}
+
+async function attemptSimpleProfitQuery(
+  userQuery: string,
+  limit: number,
+  offset: number
+): Promise<{ rows: any[]; generatedSQL: string } | null> {
+  const normalized = userQuery.toLowerCase();
+  if (!/profit/.test(normalized)) return null;
+
+  const yearMatch = userQuery.match(/(19|20)\d{2}/);
+  const year = yearMatch ? parseInt(yearMatch[0], 10) : null;
+  if (!year) return null;
+
+  const productMatch =
+    userQuery.match(/with\s+([^0-9]+?)(?:\s+in\s+(19|20)\d{2}|$)/i) ||
+    userQuery.match(/profit\s+(?:for|from|of)\s+([^0-9]+?)(?:\s+in\s+(19|20)\d{2}|$)/i) ||
+    userQuery.match(/software\s+([\w\s]+?)(?:\s+in\s+(19|20)\d{2}|$)/i);
+
+  const product = productMatch ? productMatch[1].trim() : '%';
+
+  const sql = `
+    SELECT
+      SUM(ap.Summe - COALESCE(ap.Fremdsumme, 0)) AS total_profit
+    FROM anposten ap
+    JOIN rechnung r ON ap.Nummer = r.Nummer
+    WHERE ap.Artikelnum LIKE $1
+      AND YEAR(r.Datum) = $2;
+  `;
+
+  const result = await dbClient.query(sql, [`${product}%`, year]);
+  return { rows: result.rows, generatedSQL: sql };
+}
+
+async function attemptMaintenanceIntervalQuery(
+  userQuery: string,
+  limit: number,
+  offset: number
+): Promise<{ rows: any[]; generatedSQL: string } | null> {
+  const normalized = userQuery.toLowerCase();
+  if (!/maintenance/.test(normalized)) return null;
+
+  const companyMatch = userQuery.match(/maintenance\s+(?:at|for)\s+(.+)/i);
+  const company = companyMatch ? companyMatch[1].trim() : null;
+  if (!company) return null;
+
+  const sql = `
+    WITH maintenance_events AS (
+      SELECT
+        w.Kundennumm,
+        w.Name,
+        w.Datum,
+        LEAD(w.Datum) OVER (PARTITION BY w.Kundennumm ORDER BY w.Datum) AS next_datum
+      FROM wartung w
+      WHERE w.Name LIKE $1
+         OR w.Kundennumm IN (
+              SELECT k.Kundennumm FROM kunde k WHERE k.Name LIKE $1
+           )
+    )
+    SELECT
+      AVG(DATEDIFF(DAY, Datum, next_datum)) AS avg_days_between_maintenance
+    FROM maintenance_events
+    WHERE next_datum IS NOT NULL;
+  `;
+
+  const result = await dbClient.query(sql, [`%${company}%`]);
+  return { rows: result.rows, generatedSQL: sql };
 }
 
 /**
@@ -264,14 +800,149 @@ router.post('/query', requirePermission('analytics:query:read'), async (req: Req
     }
 
     // 1. Generate SQL using cached validated SQL, direct SQL, or LLM.
-    const directSqlCandidate = extractSqlStatement(query);
+    const { schema: schemaForPrompt, tables: schemaTables } = await getSchemaContextForQuery(req, query);
+    if (!FORCE_LLM_ONLY) {
+      const simpleResult = await attemptSimpleOrderQuery(query, limit ?? 1000, offset ?? 0);
+      if (simpleResult) {
+        const visualizationType = responseParser.recommendVisualization(simpleResult.rows);
+        res.status(200).json({
+          success: true,
+          data: {
+            query,
+            generatedSQL: simpleResult.generatedSQL,
+            result: simpleResult.rows,
+            summary: `Returned ${simpleResult.rows.length} order(s) matching your request`,
+            insights: [] as string[],
+            statistics: responseParser.calculateStatistics(simpleResult.rows),
+            visualization: {
+              type: visualizationType,
+              data: responseParser.formatForVisualization(simpleResult.rows, visualizationType),
+            },
+            metadata: {
+              recordCount: simpleResult.rows.length,
+              executionTime: 0,
+              masked: false,
+              requestId,
+            },
+          },
+        });
+        return;
+      }
+  
+      const companyResult = await attemptSimpleCompanyListQuery(query, limit ?? 1000, offset ?? 0);
+      if (companyResult) {
+        const visualizationType = responseParser.recommendVisualization(companyResult.rows);
+        res.status(200).json({
+          success: true,
+          data: {
+            query,
+            generatedSQL: companyResult.generatedSQL,
+            result: companyResult.rows,
+            summary: `Returned ${companyResult.rows.length} companies`,
+            insights: [] as string[],
+            statistics: responseParser.calculateStatistics(companyResult.rows),
+            visualization: {
+              type: visualizationType,
+              data: responseParser.formatForVisualization(companyResult.rows, visualizationType),
+            },
+            metadata: {
+              recordCount: companyResult.rows.length,
+              executionTime: 0,
+              masked: false,
+              requestId,
+            },
+          },
+        });
+        return;
+      }
+  
+      const customerNamesResult = await attemptSimpleCustomerNamesQuery(query, limit ?? 1000, offset ?? 0);
+      if (customerNamesResult) {
+        const visualizationType = responseParser.recommendVisualization(customerNamesResult.rows);
+        res.status(200).json({
+          success: true,
+          data: {
+            query,
+            generatedSQL: customerNamesResult.generatedSQL,
+            result: customerNamesResult.rows,
+            summary: `Returned ${customerNamesResult.rows.length} customer names`,
+            insights: [] as string[],
+            statistics: responseParser.calculateStatistics(customerNamesResult.rows),
+            visualization: {
+              type: visualizationType,
+              data: responseParser.formatForVisualization(customerNamesResult.rows, visualizationType),
+            },
+            metadata: {
+              recordCount: customerNamesResult.rows.length,
+              executionTime: 0,
+              masked: false,
+              requestId,
+            },
+          },
+        });
+        return;
+      }
+  
+      const profitResult = await attemptSimpleProfitQuery(query, limit ?? 1000, offset ?? 0);
+      if (profitResult) {
+        res.status(200).json({
+          success: true,
+          data: {
+            query,
+            generatedSQL: profitResult.generatedSQL,
+            result: profitResult.rows,
+            summary: 'Calculated total profit',
+            insights: [],
+            statistics: responseParser.calculateStatistics(profitResult.rows),
+            visualization: {
+              type: 'TABLE',
+              data: responseParser.formatForVisualization(profitResult.rows, 'TABLE'),
+            },
+            metadata: {
+              recordCount: profitResult.rows.length,
+              executionTime: 0,
+              masked: false,
+              requestId,
+            },
+          },
+        });
+        return;
+      }
+  
+      const maintenanceResult = await attemptMaintenanceIntervalQuery(query, limit ?? 1000, offset ?? 0);
+      if (maintenanceResult) {
+        res.status(200).json({
+          success: true,
+          data: {
+            query,
+            generatedSQL: maintenanceResult.generatedSQL,
+            result: maintenanceResult.rows,
+            summary: 'Calculated average maintenance interval',
+            insights: [],
+            statistics: responseParser.calculateStatistics(maintenanceResult.rows),
+            visualization: {
+              type: 'TABLE',
+              data: responseParser.formatForVisualization(maintenanceResult.rows, 'TABLE'),
+            },
+            metadata: {
+              recordCount: maintenanceResult.rows.length,
+              executionTime: 0,
+              masked: false,
+              requestId,
+            },
+          },
+        });
+        return;
+      }
+    }
+    const directSqlCandidate = ensureTopLimit(extractSqlStatement(query));
     const isDirectSql = /^(SELECT|WITH)\b/i.test(directSqlCandidate);
     const cachedValidatedSql = !isDirectSql ? getCachedValidatedSql(userId || 'UNKNOWN', query) : null;
     const generated = isDirectSql
       ? { sql: directSqlCandidate, issues: await validateGeneratedSQL(directSqlCandidate) }
       : cachedValidatedSql
         ? { sql: cachedValidatedSql, issues: await validateGeneratedSQL(cachedValidatedSql) }
-        : await generateBestSQL(query, await getSchemaContextForRequest(req));
+        : await generateBestSQL(query, schemaForPrompt, getRelevantTranslations(schemaTables));
     const generatedSQL = generated.sql;
 
     // 2. Validate generated SQL
@@ -299,7 +970,15 @@ router.post('/query', requirePermission('analytics:query:read'), async (req: Req
 
     // 4. Execute query
     const queryStart = Date.now();
-    const result = await dbClient.query(generatedSQL);
+    const executableSQL = translateTableNames(generatedSQL);
+    // If the SQL still contains positional placeholders ($1...), bind NULLs to avoid @pN declaration errors
+    const paramMatches = Array.from(executableSQL.matchAll(/\$([1-9]\d*)/g)) as RegExpMatchArray[];
+    const paramNumbers: number[] = paramMatches.map((m: RegExpMatchArray): number => parseInt(m[1], 10));
+    const maxParam = paramNumbers.length ? Math.max(...paramNumbers) : 0;
+    const autoParams = maxParam > 0
+      ? Array.from({ length: maxParam }, () => null as null)
+      : undefined;
+    const result = await dbClient.query(executableSQL, autoParams);
     const queryDuration = Date.now() - queryStart;
 
     // 5. Parse and enhance response
@@ -480,65 +1159,6 @@ router.get("/chart/:metric", async (req: Request, res: Response) => {
  *
  * Tests query without executing it
  */
-    // Get schema
-    const ALL_TABLES = [
-  "sales",
-  "customers",
-  "products",
-  "employees",
-  "financial_metrics",
-  "inventory_movements",
-  "customer_activity",
-  "query_history",
-  "query_cache",
-  "user_sessions",
-  "audit_logs"
-];
-function detectRelevantTables(query: string) {
-  const q = query.toLowerCase();
-
-  const mapping: Record<string, string[]> = {
-    sales: ["sale", "revenue", "order", "purchase"],
-    customers: ["customer", "client"],
-    products: ["product", "item"],
-    employees: ["employee", "staff"],
-    financial_metrics: ["profit", "finance", "revenue", "cost"],
-    inventory_movements: ["inventory", "stock"],
-    customer_activity: ["activity", "login", "engagement"]
-  };
-
-  const selected = new Set<string>();
-
-  for (const table in mapping) {
-    for (const word of mapping[table]) {
-      if (q.includes(word)) {
-        selected.add(table);
-      }
-    }
-  }
-
-  if (selected.size === 0) {
-    selected.add("sales");
-    selected.add("customers");
-  }
-
-  return [...selected];
-}
-async function getFilteredSchema(req: any, tables: string[]) {
-  const fullSchema = await getSchemaContextForRequest(req);
-
-  const schemaParts = fullSchema.split("CREATE TABLE");
-
-  const filtered = schemaParts
-    .filter((block: string) =>
-      tables.some((t) => block.includes(` ${t} `))
-    )
-    .map((b: string) => "CREATE TABLE " + b)
-    .join("\n\n");
-
-  return filtered;
-}
-
 router.post('/validate', requirePermission('analytics:query:read'), async (req: Request, res: Response) => {
   const requestId = (req as any).id;
   const userId = req.user?.userId || 'UNKNOWN';
@@ -556,15 +1176,81 @@ router.post('/validate', requirePermission('analytics:query:read'), async (req: 
     }
 
     const includeExplanation = req.body?.includeExplanation === true;
-
-     // 🔎 Detect relevant tables
-  const relevantTables = detectRelevantTables(query);
-
-  // 📦 Fetch only needed schema
-  const dbSchema = await getFilteredSchema(req, relevantTables);
+    const { schema: dbSchema, tables: schemaTables } = await getSchemaContextForQuery(req, query);
+    if (!FORCE_LLM_ONLY) {
+      const simpleOrderValidation = await attemptSimpleOrderQuery(query, 100, 0);
+      if (simpleOrderValidation) {
+        res.status(200).json({
+          success: true,
+          query,
+          generatedSQL: simpleOrderValidation.generatedSQL,
+          validation: {
+            issues: [],
+            valid: true,
+          },
+        });
+        return;
+      }
+  
+      const companyListValidation = await attemptSimpleCompanyListQuery(query, 100, 0);
+      if (companyListValidation) {
+        res.status(200).json({
+          success: true,
+          query,
+          generatedSQL: companyListValidation.generatedSQL,
+          validation: {
+            issues: [],
+            valid: true,
+          },
+        });
+        return;
+      }
+  
+      const customerNamesValidation = await attemptSimpleCustomerNamesQuery(query, 100, 0);
+      if (customerNamesValidation) {
+        res.status(200).json({
+          success: true,
+          query,
+          generatedSQL: customerNamesValidation.generatedSQL,
+          validation: {
+            issues: [],
+            valid: true,
+          },
+        });
+        return;
+      }
+  
+      const profitValidation = await attemptSimpleProfitQuery(query, 100, 0);
+      if (profitValidation) {
+        res.status(200).json({
+          success: true,
+          query,
+          generatedSQL: profitValidation.generatedSQL,
+          validation: {
+            issues: [],
+            valid: true,
+          },
+        });
+        return;
+      }
+  
+      const maintenanceValidation = await attemptMaintenanceIntervalQuery(query, 100, 0);
+      if (maintenanceValidation) {
+        res.status(200).json({
+          success: true,
+          query,
+          generatedSQL: maintenanceValidation.generatedSQL,
+          validation: {
+            issues: [],
+            valid: true,
+          },
+        });
+        return;
+      }
+    }
 
     // Generate SQL
-    const generated = await generateBestSQL(query, dbSchema);
+    const generated = await generateBestSQL(query, dbSchema, getRelevantTranslations(schemaTables));
     const generatedSQL = generated.sql;
     // Validate
     const issues = generated.issues;
@@ -645,7 +1331,8 @@ router.post('/direct-query', requirePermission('analytics:query:read'), async (r
 
     // Execute the query
     const queryStartTime = performance.now();
-    const result = await dbClient.query(query);
+    const executableQuery = translateTableNames(query);
+    const result = await dbClient.query(executableQuery);
     const executionTime = Math.round(performance.now() - queryStartTime);
 
     // Apply PII masking if requested
@@ -783,8 +1470,10 @@ router.post(
       }
 
       // Execute query
-      const dbSchema = await getSchemaContextForRequest(req);
-      const sqlPrompt = promptBuilder.buildSQLGenerationPrompt(query, dbSchema);
+      const { schema: dbSchema, tables: schemaTables } = await getSchemaContextForQuery(req, query);
+      const sqlPrompt = promptBuilder.buildSQLGenerationPrompt(query, dbSchema, {
+        translationHints: getRelevantTranslations(schemaTables),
+      });
       const rawGeneratedSQL = await llmClient.generate(sqlPrompt, { temperature: 0.2 });
       const generatedSQL = extractSqlStatement(rawGeneratedSQL);
 

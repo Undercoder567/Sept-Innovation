@@ -1,4 +1,5 @@
 import { LLMClient } from './llmClient';
+import { TableTranslation, tableTranslations } from '../semantic/tableTranslations';
 
 interface SystemContext {
   businessDictionary: Record<string, string>;
@@ -18,6 +19,7 @@ interface PromptOptions {
   maxTokens?: number;
   includeExamples?: boolean;
   includeRules?: boolean;
+  translationHints?: TableTranslation[];
 }
 
 /**
@@ -113,7 +115,8 @@ Return ONLY the SQL query:`;
   options: PromptOptions = {}
 ): string {
 
-  const { includeExamples = true } = options;
+  const { includeExamples = true, translationHints } = options;
+  const translationSection = this.buildTranslationSection(translationHints);
 
   let prompt = `You are an expert SQL Server (T-SQL) query builder.
 
@@ -121,6 +124,8 @@ Convert the user request into ONE valid SQL query.
 
 DATABASE SCHEMA:
 ${schemaContext}
+
+${translationSection ? `TABLE TRANSLATIONS:\n${translationSection}\n` : ''}
 
 `;
 
@@ -357,6 +362,23 @@ ${example.sqlGenerated}
     return section;
   }
 
+  private buildTranslationSection(translations?: TableTranslation[]): string {
+    const list = translations && translations.length > 0
+      ? translations
+      : tableTranslations.slice(0, 12);
+
+    if (list.length === 0) {
+      return '';
+    }
+
+    return list
+      .map((translation) => {
+        const alias = translation.englishAlias || translation.germanName;
+        return `- ${alias} -> ${translation.germanName}: ${translation.description}`;
+      })
+      .join('\n');
+  }
+
   /**
    * Format business rules from dictionary
    */
@@ -397,9 +419,9 @@ ${example.sqlGenerated}
           userQuery: 'Give me customer names',
           intent: 'FILTERING',
           sqlGenerated: `SELECT TOP 100
-  c.name
-FROM customers c
-ORDER BY c.name ASC;`,
+  k.Name
+FROM kunde k
+ORDER BY k.Name ASC;`,
           expectedResult: 'Customer Name',
         },
         {
@@ -421,17 +443,47 @@ OFFSET 0 ROWS FETCH NEXT 50 ROWS ONLY;`,
           userQuery: 'Show me the top 10 products by revenue this year',
           intent: 'RANKING',
           sqlGenerated: `SELECT TOP 10
-  p.product_id,
-  p.name as product_name,
-  SUM(s.amount) as total_revenue,
-  SUM(s.quantity) as units_sold
-FROM sales s
-JOIN products p ON s.product_id = p.product_id
+  ap.Artikelnum,
+  COUNT(*) AS line_count,
+  SUM(ap.Summe) AS total_revenue
+FROM anposten ap
+JOIN rechnung r ON ap.Nummer = r.Nummer
 WHERE 
-  DATEPART(YEAR, s.order_date) = DATEPART(YEAR, GETDATE())
-GROUP BY p.product_id, p.name
+  YEAR(r.Datum) = YEAR(GETDATE())
+GROUP BY ap.Artikelnum
 ORDER BY total_revenue DESC;`,
-          expectedResult: 'Product ID | Product Name | Total Revenue | Units Sold',
+          expectedResult: 'Artikelnum | Total Revenue | Line Count',
+        },
+        {
+          userQuery: 'Calculate the total profit we made with software Y in 2025',
+          intent: 'AGGREGATION',
+          sqlGenerated: `SELECT
+  SUM(ap.Summe - COALESCE(ap.Fremdsumme, 0)) AS total_profit
+FROM anposten ap
+JOIN rechnung r ON ap.Nummer = r.Nummer
+WHERE
+  ap.Artikelnum LIKE $1
+  AND YEAR(r.Datum) = $2;`,
+          expectedResult: 'Total profit for Software Y in 2025',
+        },
+        {
+          userQuery: 'What is the expected interval for maintenance at company Z',
+          intent: 'STATISTICS',
+          sqlGenerated: `WITH maintenance_events AS (
+  SELECT
+    w.Kundennumm,
+    w.Name,
+    w.Datum,
+    LEAD(w.Datum) OVER (PARTITION BY w.Kundennumm ORDER BY w.Datum) AS next_datum
+  FROM wartung w
+  WHERE w.Name LIKE $1
+     OR w.Kundennumm IN (SELECT k.Kundennumm FROM kunde k WHERE k.Name LIKE $1)
+)
+SELECT
+  AVG(DATEDIFF(DAY, Datum, next_datum)) AS avg_maintenance_interval
+FROM maintenance_events
+WHERE next_datum IS NOT NULL;`,
+          expectedResult: 'Average days between maintenance events for Company Z',
         },
       ],
     };

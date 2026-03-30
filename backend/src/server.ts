@@ -8,7 +8,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { setupAuditLogger, AuditLogger } from './logs/auditLogger';
 import { authMiddleware } from './security/authMiddleware';
 import { rbacMiddleware } from './security/rbac';
-import analyticsRouter from './api/analytics.controller';
+import analyticsRouter, { analyticsSchemaReady } from './api/analytics.controller';
 import authRouter from './api/auth.controller';
 import { errorHandler } from './middleware/errorHandler';
 import { requestLogger } from './middleware/requestLogger';
@@ -119,26 +119,36 @@ app.use((req: Request, res: Response) => {
 // Global error handler
 app.use(errorHandler(auditLogger));
 
+let server: ReturnType<typeof app.listen>;
+
+async function startServer(): Promise<void> {
+  await analyticsSchemaReady;
+
+  server = app.listen(PORT, () => {
+    console.log(`🚀 Server is running on port ${PORT} in ${NODE_ENV} mode`);
+    console.log(`📊 Analytics API available at http://localhost:${PORT}/api/analytics`);
+    auditLogger.log({
+      timestamp: new Date(),
+      action: 'SERVER_START',
+      userId: 'SYSTEM',
+      resource: 'SERVER',
+      details: { port: PORT, environment: NODE_ENV },
+      severity: 'INFO',
+    });
+  });
+}
+
+startServer().catch(err => {
+  console.error('Failed to start server', err);
+  process.exit(1);
+});
+
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('SIGTERM signal received: closing HTTP server');
-  server.close(() => {
+  server?.close(() => {
     console.log('HTTP server closed');
     process.exit(0);
-  });
-});
-
-// Start server
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server is running on port ${PORT} in ${NODE_ENV} mode`);
-  console.log(`📊 Analytics API available at http://localhost:${PORT}/api/analytics`);
-  auditLogger.log({
-    timestamp: new Date(),
-    action: 'SERVER_START',
-    userId: 'SYSTEM',
-    resource: 'SERVER',
-    details: { port: PORT, environment: NODE_ENV },
-    severity: 'INFO',
   });
 });
 

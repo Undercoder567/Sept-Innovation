@@ -13,6 +13,7 @@ interface DBConfig {
   trustServerCertificate?: boolean;
   trustedConnection?: boolean;
   schema?: string;
+  instanceName?: string;
 }
 
 interface QueryResult<T = any> {
@@ -40,6 +41,8 @@ interface TransactionOptions {
 class DatabaseClient {
   private pool: ConnectionPool;
   private connectionCount = 0;
+  private schemaEnsured = false;
+  private connectionPromise: Promise<void>;
 
   constructor(config: DBConfig = {}) {
     const password = config.password ?? process.env.DB_PASSWORD;
@@ -55,22 +58,29 @@ class DatabaseClient {
     }
 
     const hostRaw = config.host || process.env.DB_HOST || 'localhost';
-    const [serverName, instanceName] = hostRaw.split('\\');
+    const instanceSeparatorIndex = hostRaw.indexOf('\\');
+    const serverName = instanceSeparatorIndex >= 0 ? hostRaw.substring(0, instanceSeparatorIndex) : hostRaw;
+    const derivedInstanceName = instanceSeparatorIndex >= 0 ? hostRaw.substring(instanceSeparatorIndex + 1) : undefined;
+    const instanceName = config.instanceName ?? derivedInstanceName;
+
+    const optionsConfig: SqlConfig['options'] = {
+      encrypt: config.encrypt ?? process.env.DB_ENCRYPT === 'true',
+      trustServerCertificate: config.trustServerCertificate ?? process.env.DB_TRUST_SERVER_CERT === 'true',
+      enableArithAbort: true,
+    };
+    if (instanceName) {
+      optionsConfig.instanceName = instanceName;
+    }
 
     const finalConfig: SqlConfig = {
       server: serverName,
-      port: parsedPort,
-      instanceName: instanceName,
+      port: instanceName ? undefined : parsedPort,
       database: config.database || process.env.DB_NAME || 'ERP42test',
       pool: {
         max: config.max || 20,
         idleTimeoutMillis: config.idleTimeoutMillis ?? 30000,
       },
-      options: {
-        encrypt: config.encrypt ?? process.env.DB_ENCRYPT === 'true',
-        trustServerCertificate: config.trustServerCertificate ?? process.env.DB_TRUST_SERVER_CERT === 'true',
-        enableArithAbort: true,
-      },
+      options: optionsConfig,
       connectionTimeout: config.connectionTimeoutMillis ?? 10000,
       requestTimeout: config.connectionTimeoutMillis ?? 10000,
     };
@@ -79,20 +89,19 @@ class DatabaseClient {
     finalConfig.password = password!;
 
     this.pool = new sql.ConnectionPool(finalConfig);
-
     this.pool.on('error', (err) => {
       console.error('Database pool error', err);
     });
 
-    this.pool.on('connect', () => {
-      this.connectionCount++;
-      console.log(`Database connected. Active connections: ${this.connectionCount}`);
-    });
-
-    this.pool.connect().catch((err) => {
-      console.error('Failed to connect to SQL Server', err);
-      throw err;
-    });
+    this.connectionPromise = this.pool.connect()
+      .then(() => {
+        this.connectionCount++;
+        console.log(`Database connected. Active connections: ${this.connectionCount}`);
+      })
+      .catch((err) => {
+        console.error('Failed to connect to SQL Server', err);
+        throw err;
+      });
   }
 
   /**
@@ -119,6 +128,7 @@ class DatabaseClient {
       request.input(`p${index + 1}`, value);
     });
 
+    await this.connectionPromise;
     const raw = await request.query<T>(normalizedSql);
     const rows = (raw.recordset ?? []) as T[];
     const rowCount = Array.isArray(raw.rowsAffected)
@@ -129,6 +139,107 @@ class DatabaseClient {
       : [];
 
     return { rows, rowCount, fields };
+  }
+
+  /**
+   * Ensure analytics helper tables exist so caching and audit logging can operate.
+   */
+  async ensureAnalyticsSchema(): Promise<void> {
+    if (this.schemaEnsured) {
+      return;
+    }
+
+    await this.connectionPromise;
+
+    const statements = [
+      `
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.tables t
+        WHERE t.name = 'audit_logs' AND t.schema_id = SCHEMA_ID('dbo')
+      )
+      BEGIN
+        CREATE TABLE dbo.audit_logs (
+          audit_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+          timestamp DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+          action NVARCHAR(100) NOT NULL,
+          user_id NVARCHAR(255) NOT NULL,
+          resource NVARCHAR(255) NOT NULL,
+          details NVARCHAR(MAX),
+          severity NVARCHAR(20) DEFAULT 'INFO',
+          ip_address NVARCHAR(45),
+          status NVARCHAR(20),
+          created_at DATETIME2 DEFAULT SYSUTCDATETIME()
+        );
+        CREATE INDEX IDX_AUDIT_USER ON dbo.audit_logs(user_id);
+        CREATE INDEX IDX_AUDIT_TIMESTAMP ON dbo.audit_logs(timestamp DESC);
+      END`,
+      `
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.tables t
+        WHERE t.name = 'query_cache' AND t.schema_id = SCHEMA_ID('dbo')
+      )
+      BEGIN
+        CREATE TABLE dbo.query_cache (
+          cache_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+          query_hash NVARCHAR(64) NOT NULL UNIQUE,
+          user_id NVARCHAR(255) NOT NULL,
+          original_query NVARCHAR(MAX) NOT NULL,
+          generated_sql NVARCHAR(MAX) NOT NULL,
+          result_data NVARCHAR(MAX),
+          execution_time INT,
+          record_count INT,
+          created_at DATETIME2 DEFAULT SYSUTCDATETIME(),
+          expires_at DATETIME2,
+          access_count INT DEFAULT 0
+        );
+        CREATE INDEX IDX_QUERY_CACHE_HASH ON dbo.query_cache(query_hash);
+      END`,
+      `
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.tables t
+        WHERE t.name = 'query_history' AND t.schema_id = SCHEMA_ID('dbo')
+      )
+      BEGIN
+        CREATE TABLE dbo.query_history (
+          query_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+          user_id NVARCHAR(255) NOT NULL,
+          original_query NVARCHAR(MAX) NOT NULL,
+          generated_sql NVARCHAR(MAX) NOT NULL,
+          execution_time INT,
+          record_count INT,
+          success BIT,
+          error_message NVARCHAR(MAX),
+          created_at DATETIME2 DEFAULT SYSUTCDATETIME()
+        );
+        CREATE INDEX IDX_QUERY_HISTORY_USER ON dbo.query_history(user_id);
+        CREATE INDEX IDX_QUERY_HISTORY_CREATED ON dbo.query_history(created_at);
+      END`,
+      `
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.tables t
+        WHERE t.name = 'user_sessions' AND t.schema_id = SCHEMA_ID('dbo')
+      )
+      BEGIN
+        CREATE TABLE dbo.user_sessions (
+          session_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+          user_id NVARCHAR(255) NOT NULL,
+          login_time DATETIME2 DEFAULT SYSUTCDATETIME(),
+          last_activity DATETIME2 DEFAULT SYSUTCDATETIME(),
+          ip_address NVARCHAR(45),
+          user_agent NVARCHAR(MAX),
+          is_active BIT DEFAULT 1,
+          logout_time DATETIME2
+        );
+        CREATE INDEX IDX_USER_SESSIONS_USER ON dbo.user_sessions(user_id);
+      END`,
+    ];
+
+    for (const statement of statements) {
+      const request = this.pool.request();
+      await request.batch(statement);
+    }
+
+    this.schemaEnsured = true;
   }
 
   /**

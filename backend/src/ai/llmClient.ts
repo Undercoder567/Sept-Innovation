@@ -53,7 +53,7 @@ class LLMClient {
     baseUrl: string = process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
     model: string = process.env.OLLAMA_MODEL || 'llama2',
     embeddingModel: string = process.env.OLLAMA_EMBEDDING_MODEL || 'nomic-embed-text',
-    timeout: number = 30000
+    timeout: number = parseInt(process.env.OLLAMA_TIMEOUT_MS || '45000', 10)
   ) {
     this.baseUrl = baseUrl;
     this.model = model;
@@ -86,7 +86,7 @@ class LLMClient {
    */
   async getAvailableModels(): Promise<string[]> {
     try {
-      const response = await this.client.get('/api/tags');
+      const response = await this.client.get('/api/tags', { timeout: this.timeout });
       return response.data.models?.map((m: any) => m.name) || [];
     } catch (error) {
       console.error('Error fetching available models:', error);
@@ -119,7 +119,8 @@ class LLMClient {
 
       const response = await this.client.post<OllamaGenerateResponse>(
         '/api/generate',
-        request
+        request,
+        { timeout: this.timeout }
       );
 
       if (!response.data.done) {
@@ -138,14 +139,14 @@ messages: { role: "system" | "user" | "assistant"; content: string }[],
 options?: { temperature?: number }
 ): Promise<string> {
 try {
-const response = await this.client.post("/api/chat", {
+      const response = await this.client.post("/api/chat", {
 model: this.model,
 messages,
 stream: false,
 options: {
 temperature: options?.temperature ?? 0.7,
 },
-});
+},{ timeout: this.timeout });
 return response.data.message.content.trim();
 
 } catch (error) {
@@ -169,7 +170,8 @@ throw error;
 
       const response = await this.client.post<OllamaEmbeddingResponse>(
         '/api/embeddings',
-        request
+        request,
+        { timeout: this.timeout }
       );
 
       return response.data.embedding;

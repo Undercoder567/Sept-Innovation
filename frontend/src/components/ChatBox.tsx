@@ -2,15 +2,15 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Send, Bot, User, Loader2 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
-import {  sendChat, sendChatMessage } from "../api/analytics";
-import type{ ChatMessage } from "../api/analytics";
+import { sendChat, sendChatMessage } from "../api/analytics";
+import type { ChatMessage } from "../api/analytics";
 import { useTheme } from "../ThemeContent";
 
 const WELCOME: ChatMessage = {
   id: "welcome", role: "assistant", timestamp: new Date(),
   content: "Hi! I'm your analytics assistant. Ask me about revenue trends, user behaviour, or I can generate SQL queries for your data.",
 };
-const QUICK = [/* "Summarize revenue", "Top customers SQL", "Show DAU breakdown", "Latency analysis" */];
+const QUICK: string[] = [];
 const COLORS = ["#00e5ff", "#7c3aed", "#f59e0b"];
 
 const MsgBubble: React.FC<{ msg: ChatMessage; dark: boolean }> = ({ msg, dark }) => {

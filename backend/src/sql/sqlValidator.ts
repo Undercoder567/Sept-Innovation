@@ -35,9 +35,10 @@ class SQLValidator {
       allowedFunctions: config.allowedFunctions || [
         'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'STDDEV', 'VARIANCE',
         'COALESCE', 'CASE', 'CAST', 'EXTRACT',
-        'DATEPART', 'DATEADD', 'DATEDIFF', 'GETDATE', 'DATEFROMPARTS',
+        'DATEPART', 'DATEADD', 'DATEDIFF', 'YEAR', 'GETDATE', 'DATEFROMPARTS',
         'CONVERT', 'FORMAT',
-        'CONCAT', 'SUBSTRING', 'ROUND', 'ABS', 'FLOOR', 'CEILING'
+        'CONCAT', 'SUBSTRING', 'ROUND', 'ABS', 'FLOOR', 'CEILING',
+        'LEAD', 'LAG', 'OVER', 'AS', 'IN'
       ],
       requireParameterization: config.requireParameterization ?? true,
       strictMode: config.strictMode ?? true,
@@ -278,9 +279,9 @@ class SQLValidator {
 
     // Check for unparameterized values
     const numberPattern = /=\s*(\d+)/g;
-    const matches = sql.matchAll(numberPattern);
-    
-    for (const match of matches) {
+    const numberMatches = Array.from(sql.matchAll(numberPattern));
+
+    for (const match of numberMatches) {
       // Allow specific numbers like LIMIT 100
       const context = sql.substring(match.index! - 10, match.index).toUpperCase();
       if (!context.includes('LIMIT') && !context.includes('TOP')) {
@@ -294,9 +295,13 @@ class SQLValidator {
       }
     }
 
-    // Check for parameter usage
+    // Check for parameter usage only when literals exist
     const paramPattern = /\$\d+/g;
-    if (!paramPattern.test(sql)) {
+    const stringLiteralPattern = /'[^']*'/g;
+    const hasStringLiterals = stringLiteralPattern.test(sql);
+    const shouldParameterize = hasStringLiterals || numberMatches.length > 0;
+
+    if (shouldParameterize && !paramPattern.test(sql)) {
       issues.push({
         type: 'INFO',
         code: 'NO_PARAMETERS',

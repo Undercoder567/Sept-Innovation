@@ -5,8 +5,10 @@ import InsightCard from "../components/InsightCard";
 import ChartRenderer from "../components/ChartRenderer";
 import SqlViewer from "../components/SqlViewer";
 import ChatBox from "../components/ChatBox";
+import TableUsagePanel from "../components/TableUsagePanel";
+import TableRelationshipExplorer from "../components/TableRelationshipExplorer";
 import { fetchInsights } from "../api/analytics";
-import type{  InsightData } from "../api/analytics";
+import type { InsightData } from "../api/analytics";
 import { useTheme } from "../ThemeContent";
 
 const Dashboard: React.FC = () => {
@@ -16,7 +18,7 @@ const Dashboard: React.FC = () => {
   const [insights,       setInsights]       = useState<InsightData[]>([]);
   const [loadingInsights, setLoadingInsights] = useState(true);
   const [lastRefresh,    setLastRefresh]    = useState(new Date());
-  const [activeTab,      setActiveTab]      = useState<"chart" | "sql">("chart");
+  const [activeTab,      setActiveTab]      = useState<"chart" | "sql" | "tables" | "relationships">("chart");
 
   const loadInsights = () => {
     setLoadingInsights(true);
@@ -102,17 +104,31 @@ const Dashboard: React.FC = () => {
             <div className={`flex gap-0.5 p-1 rounded-xl border w-fit
               dark:bg-[#131622] dark:border-white/[0.07]
               light:bg-white light:border-gray-200`}>
-              {(["chart", "sql"] as const).map((t) => (
-                <button key={t} onClick={() => setActiveTab(t)}
-                  className={`px-4 py-1.5 text-[12px] font-semibold rounded-lg capitalize transition-all
-                    ${activeTab === t
+            {(["chart", "sql", "tables", "relationships"] as const).map((t) => (
+              <button key={t} onClick={() => setActiveTab(t)}
+                className={`px-4 py-1.5 text-[12px] font-semibold rounded-lg capitalize transition-all
+                  ${activeTab === t
                       ? "text-cyan-400 " + (dark ? "bg-[#1a1d2e]" : "bg-gray-100")
                       : "dark:text-gray-500 dark:hover:text-gray-300 light:text-gray-400 light:hover:text-gray-600"}`}>
-                  {t === "chart" ? "Charts" : "SQL"}
+                  {t === "chart"
+                    ? "Charts"
+                    : t === "sql"
+                      ? "SQL"
+                      : t === "tables"
+                        ? "Tables"
+                        : "Relationships"}
                 </button>
               ))}
             </div>
-            {activeTab === "chart" ? <ChartRenderer /> : <SqlViewer />}
+            {activeTab === "chart" ? (
+              <ChartRenderer />
+            ) : activeTab === "sql" ? (
+              <SqlViewer />
+            ) : activeTab === "tables" ? (
+              <TableUsagePanel />
+            ) : (
+              <TableRelationshipExplorer />
+            )}
           </div>
 
           {/* Right */}
@@ -120,6 +136,7 @@ const Dashboard: React.FC = () => {
             <ChatBox />
           </div>
         </section>
+
       </main>
     </div>
   );

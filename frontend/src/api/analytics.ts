@@ -16,6 +16,35 @@ export interface InsightData {
   description: string;
 }
 
+export interface TableUsageRow {
+  name: string;
+  englishAlias: string;
+  rowCount: number;
+}
+
+export interface TableRelationshipNode {
+  id: string;
+  name: string;
+  englishAlias?: string;
+}
+
+export interface TableRelationshipEdge {
+  id: string;
+  source: string;
+  target: string;
+  parentColumns: string;
+  referencedColumns: string;
+  onDelete: string;
+  onUpdate: string;
+  type: "fk" | "inferred";
+  inferredReason?: string;
+}
+
+export interface TableRelationshipGraph {
+  nodes: TableRelationshipNode[];
+  edges: TableRelationshipEdge[];
+}
+
 export interface SqlResult {
   columns: string[];
   rows: (string | number | null)[][];
@@ -256,6 +285,26 @@ export async function fetchChartData(
     console.error(`Failed to fetch ${metric} chart data:`, error);
     return generateChartFallback();
   }
+}
+
+interface TableUsageApiResponse {
+  success: boolean;
+  data: TableUsageRow[];
+}
+
+interface TableRelationshipApiResponse {
+  success: boolean;
+  data: TableRelationshipGraph;
+}
+
+export async function fetchTableUsage(): Promise<TableUsageRow[]> {
+  const response = await apiCall<TableUsageApiResponse>("/table-usage");
+  return response.data;
+}
+
+export async function fetchTableRelationships(): Promise<TableRelationshipGraph> {
+  const response = await apiCall<TableRelationshipApiResponse>("/table-relationships");
+  return response.data;
 }
 
 function generateChartFallback(): ChartData[] {

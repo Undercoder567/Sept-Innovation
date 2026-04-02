@@ -43,123 +43,37 @@ class PromptBuilder {
     this.systemContext = systemContext || this.getDefaultContext();
   }
 
-  /**
-   * Build SQL generation prompt
-   * Transforms natural language query into SQL with clear instructions
-   */
-/*   buildSQLGenerationPrompt(
-    userQuery: string,
-    schemaContext: string,
-    options: PromptOptions = {}
-  ): string {
-    const {
-      includeExamples = true,
-      includeRules = true,
-    } = options;
-
-    let prompt = `You are an expert SQL query generator. Your task is to convert natural language requests into SQL queries.
-
-IMPORTANT CONSTRAINTS:
-1. ALWAYS use parameterized queries - never include literal values in SELECT/WHERE clauses
-2. Use parameter placeholders: $1, $2, $3, etc.
-3. Return ONLY the SQL query, no explanations
-4. Never use SELECT *, always specify column names
-5. Include appropriate JOINs based on schema context
-6. Add WHERE clauses for filtering and security
-7. Use aggregate functions (COUNT, SUM, AVG) when appropriate
-8. Sort results in logical order (by date DESC for time-series)
-9. Limit results appropriately (use TOP 1000 or OFFSET/FETCH by default)
-10. Handle NULL values appropriately with COALESCE or IS NOT NULL
-11. Use ONLY tables and columns that exist in DATABASE SCHEMA below
-12. Never invent tables/columns (e.g., transactions, is_test) if they are not present
-13. Do not add filters/conditions that the user did not request
-
-DATABASE SCHEMA:
-\`\`\`
-${schemaContext}
-\`\`\`
-
-BUSINESS RULES AND DEFINITIONS:
-${this.formatBusinessRules()}
-
-`;
-
-    if (includeExamples && this.systemContext.examples.length > 0) {
-      prompt += this.buildExamplesSection();
-    }
-
-    if (includeRules && this.systemContext.queryRules.length > 0) {
-      prompt += `\nQUERY RULES:
-${this.systemContext.queryRules.map((rule, i) => `${i + 1}. ${rule}`).join('\n')}
-`;
-    }
-
-    prompt += `\nNOW, convert this user query to SQL:
-"${userQuery}"
-
-OUTPUT RULES (MANDATORY):
-- Return exactly ONE SQL statement
-- Start with SELECT or WITH
-- End with semicolon
-- Do NOT include markdown/code fences
-- Do NOT include explanations, notes, examples, or extra text
-
-Return ONLY the SQL query:`;
-
-    return prompt;
-  } */
-
-    buildSQLGenerationPrompt(
+buildSQLGenerationPrompt(
   userQuery: string,
   schemaContext: string,
   options: PromptOptions = {}
 ): string {
 
-  const { includeExamples = true, translationHints } = options;
+  const { translationHints } = options;
   const translationSection = this.buildTranslationSection(translationHints);
 
-  let prompt = `You are an expert SQL Server (T-SQL) query builder.
+  return `You are a SQL Server (T-SQL) expert.
 
-Convert the user request into ONE valid SQL query.
+TASK:
+Generate ONE valid SQL query for the user request.
 
-DATABASE SCHEMA:
+SCHEMA:
 ${schemaContext}
 
-${translationSection ? `TABLE TRANSLATIONS:\n${translationSection}\n` : ''}
+${translationSection ? `MAPPINGS:\n${translationSection}` : ''}
 
-`;
+CONSTRAINTS:
+- Use only tables/columns from SCHEMA
+- No SELECT *
+- Use JOINs when needed
+- Use TOP 100 unless specified
+- Use correct filters (e.g., YEAR(date))
 
-  if (includeExamples && this.systemContext.examples.length > 0) {
-    prompt += `
-EXAMPLES:
-${this.buildExamplesSection()}
-`;
-  }
-
-  prompt += `
-RULES:
-1. Use ONLY tables and columns from DATABASE SCHEMA.
-2. Never invent tables or columns.
-3. Never use SELECT * — always list columns explicitly.
-4. Use proper JOIN conditions when multiple tables are needed.
-5. Use aggregate functions (COUNT, SUM, AVG) when appropriate.
-6. Use GROUP BY when using aggregates.
-7. Use ORDER BY for ranking or sorting.
-8. Limit result sets using TOP or OFFSET/FETCH (default to 100 rows unless the user requests otherwise).
-
-USER QUESTION:
+USER:
 ${userQuery}
-
-OUTPUT:
-Return exactly ONE SQL query.
-Start with SELECT or WITH.
-End with a semicolon.
-Do not include explanations or markdown.
 
 SQL:
 `;
-
-  return prompt;
 }
 
   /**

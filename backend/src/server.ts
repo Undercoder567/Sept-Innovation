@@ -8,7 +8,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { setupAuditLogger, AuditLogger } from './logs/auditLogger';
 import { authMiddleware } from './security/authMiddleware';
 import { rbacMiddleware } from './security/rbac';
-import analyticsRouter, { analyticsSchemaReady } from './api/analytics.controller';
+import analyticsRouter from './api/analytics.controller';
 import authRouter from './api/auth.controller';
 import { errorHandler } from './middleware/errorHandler';
 import { requestLogger } from './middleware/requestLogger';
@@ -122,8 +122,6 @@ app.use(errorHandler(auditLogger));
 let server: ReturnType<typeof app.listen>;
 
 async function startServer(): Promise<void> {
-  await analyticsSchemaReady;
-
   server = app.listen(PORT, () => {
     console.log(`🚀 Server is running on port ${PORT} in ${NODE_ENV} mode`);
     console.log(`📊 Analytics API available at http://localhost:${PORT}/api/analytics`);

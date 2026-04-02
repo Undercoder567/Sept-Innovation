@@ -9,7 +9,7 @@ import { DatabaseClient } from '../sql/dbClient';
 import { SQLGenerator } from '../sql/sqlGenerator';
 import { SQLValidator, ValidationIssue } from '../sql/sqlValidator';
 import { PIIMasker } from '../security/piiMasker';
-import { checkPermission, checkDataAccess, requirePermission } from '../security/rbac';
+import { requirePermission } from '../security/rbac';
 import { AuditLogger } from '../logs/auditLogger';
 import { TableTranslation, tableTranslations } from '../semantic/tableTranslations';
 
@@ -127,23 +127,6 @@ function detectMentionedTables(query: string): string[] {
   return Array.from(detected);
 }
 
-function filterSchemaByTableNames(schema: string, tableNames: string[]): string {
-  if (!schema || tableNames.length === 0) {
-    return schema;
-  }
-
-  const normalizedTargets = tableNames.map((t) => t.toLowerCase());
-  const parts = schema
-    .split(/(?=CREATE\s+TABLE)/i)
-    .map((part) => part.trim())
-    .filter(Boolean);
-
-  const filtered = parts.filter((part) =>
-    normalizedTargets.some((name) => part.toLowerCase().includes(`[${name}]`) || part.toLowerCase().includes(` ${name}`))
-  );
-
-  return filtered.length > 0 ? filtered.join('\n\n') : schema;
-}
 
 function getRelevantTranslations(tableNames: string[]): TableTranslation[] {
   const normalized = new Set(tableNames.map((name) => name.toLowerCase()));
@@ -199,12 +182,10 @@ const querySchema = Joi.object({
 });
 const QUERY_CACHE_TTL_SECONDS = parseInt(process.env.QUERY_CACHE_TTL_SECONDS || '300', 10);
 const VALIDATED_SQL_TTL_MS = parseInt(process.env.VALIDATED_SQL_TTL_MS || '180000', 10);
-const SCHEMA_CACHE_TTL_MS = parseInt(process.env.SCHEMA_CACHE_TTL_MS || '60000', 10);
 const DEFAULT_TOP_LIMIT = parseInt(process.env.DEFAULT_TOP_LIMIT || '100', 10);
 const FORCE_LLM_ONLY = (process.env.FORCE_LLM_ONLY || process.env.FORCE_LLM || 'true').toLowerCase() === 'true';
 
 const validatedSqlCache = new Map<string, { sql: string; expiresAt: number }>();
-let schemaCache: { schema: string; expiresAt: number } = { schema: '', expiresAt: 0 };
 
 /**
  * Simple Chat with Model
@@ -540,23 +521,6 @@ function setCachedValidatedSql(userId: string, userQuery: string, sql: string): 
   validatedSqlCache.set(key, { sql, expiresAt: Date.now() + VALIDATED_SQL_TTL_MS });
 }
 
-async function getSchemaContextCached(): Promise<string> {
-  if (schemaCache.schema && Date.now() < schemaCache.expiresAt) {
-    return schemaCache.schema;
-  }
-  const schema = await dbClient.getDatabaseSchema();
-  schemaCache = { schema, expiresAt: Date.now() + SCHEMA_CACHE_TTL_MS };
-  return schema;
-}
-
-async function getSchemaContextForRequest(req: Request): Promise<string> {
-  const reqAny = req as any;
-  if (!reqAny._schemaContextPromise) {
-    reqAny._schemaContextPromise = getSchemaContextCached();
-  }
-  return reqAny._schemaContextPromise;
-}
-
 async function attemptSimpleOrderQuery(
   userQuery: string,
   limit: number,
@@ -657,8 +621,6 @@ async function attemptSimpleCustomerNamesQuery(
 
 async function attemptSimpleProfitQuery(
   userQuery: string,
-  limit: number,
-  offset: number
 ): Promise<{ rows: any[]; generatedSQL: string } | null> {
   const normalized = userQuery.toLowerCase();
   if (!/profit/.test(normalized)) return null;
@@ -689,8 +651,6 @@ async function attemptSimpleProfitQuery(
 
 async function attemptMaintenanceIntervalQuery(
   userQuery: string,
-  limit: number,
-  offset: number
 ): Promise<{ rows: any[]; generatedSQL: string } | null> {
   const normalized = userQuery.toLowerCase();
   if (!/maintenance/.test(normalized)) return null;
@@ -883,7 +843,7 @@ router.post('/query', requirePermission('analytics:query:read'), async (req: Req
         return;
       }
   
-      const profitResult = await attemptSimpleProfitQuery(query, limit ?? 1000, offset ?? 0);
+      const profitResult = await attemptSimpleProfitQuery(query);
       if (profitResult) {
         res.status(200).json({
           success: true,
@@ -909,7 +869,7 @@ router.post('/query', requirePermission('analytics:query:read'), async (req: Req
         return;
       }
   
-      const maintenanceResult = await attemptMaintenanceIntervalQuery(query, limit ?? 1000, offset ?? 0);
+      const maintenanceResult = await attemptMaintenanceIntervalQuery(query,);
       if (maintenanceResult) {
         res.status(200).json({
           success: true,
@@ -1220,7 +1180,7 @@ router.post('/validate', requirePermission('analytics:query:read'), async (req: 
         return;
       }
   
-      const profitValidation = await attemptSimpleProfitQuery(query, 100, 0);
+      const profitValidation = await attemptSimpleProfitQuery(query);
       if (profitValidation) {
         res.status(200).json({
           success: true,
@@ -1234,7 +1194,7 @@ router.post('/validate', requirePermission('analytics:query:read'), async (req: 
         return;
       }
   
-      const maintenanceValidation = await attemptMaintenanceIntervalQuery(query, 100, 0);
+      const maintenanceValidation = await attemptMaintenanceIntervalQuery(query,);
       if (maintenanceValidation) {
         res.status(200).json({
           success: true,

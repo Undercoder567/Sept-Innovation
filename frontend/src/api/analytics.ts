@@ -343,7 +343,7 @@ export async function runSqlQuery(query: string): Promise<SqlResult> {
   }
 }
 
- export async function sendChat(
+/*  export async function sendChat(
   _messages: ChatMessage[],
   userMessage: string
 ): Promise<ChatMessage> {
@@ -397,8 +397,87 @@ export async function runSqlQuery(query: string): Promise<SqlResult> {
       timestamp: new Date(),
     };
   }
-} 
+}  */
 
+  export async function sendChat(
+  _messages: ChatMessage[],
+  userMessage: string
+): Promise<ChatMessage> {
+  const requestId = crypto.randomUUID();
+
+  try {
+    console.log(`[CHAT][START] requestId=${requestId}`);
+    console.log(`[CHAT][USER_QUERY]`, userMessage);
+
+    // 1. Generate SQL
+    const validation = await apiCall<ValidateApiResponse>("/validate", {
+      method: "POST",
+      body: JSON.stringify({ query: userMessage }),
+    });
+
+    console.log(`[CHAT][RAW_SQL_RESPONSE]`, validation.generatedSQL);
+
+    const generatedSql = cleanGeneratedSql(validation.generatedSQL || "");
+
+    console.log(`[CHAT][CLEAN_SQL]`, generatedSql);
+
+    if (!generatedSql) {
+      throw new Error("No SQL generated");
+    }
+
+    // 2. Execute SQL
+    console.log(`[CHAT][EXECUTE_SQL]`, generatedSql);
+
+    const startTime = performance.now();
+
+    const queryResult = await apiCall<QueryApiResponse>("/query", {
+      method: "POST",
+      body: JSON.stringify({ query: generatedSql, masked: true }),
+    });
+
+    const endTime = performance.now();
+
+    console.log(
+      `[CHAT][QUERY_SUCCESS] duration=${(endTime - startTime).toFixed(2)}ms`
+    );
+    console.log(
+      `[CHAT][ROW_COUNT]`,
+      queryResult.data.metadata?.recordCount
+    );
+
+    // 3. Process result
+    const rows = normalizeRows(queryResult.data.result);
+    const { columns, matrix } = rowsToTable(rows);
+
+    console.log(`[CHAT][COLUMNS]`, columns);
+    console.log(`[CHAT][FIRST_ROW]`, matrix[0]);
+
+    const rowCount =
+      queryResult.data.metadata?.recordCount ?? matrix.length;
+    const executionTime =
+      queryResult.data.metadata?.executionTime ?? 0;
+
+    return {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: `Found ${rowCount} records in ${executionTime}ms.`,
+      timestamp: new Date(),
+      sqlQuery: generatedSql,
+      chartData: transformRowsToChart(matrix, columns),
+    };
+  } catch (error) {
+    console.error(`[CHAT][ERROR] requestId=${requestId}`, error);
+
+    return {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: `Error: ${
+        error instanceof Error ? error.message : "Unknown error"
+      }`,
+      timestamp: new Date(),
+    };
+  }
+}
 export async function sendChatMessage(
 _messages: ChatMessage[],
 userMessage: string

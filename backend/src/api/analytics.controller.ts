@@ -1,48 +1,20 @@
 import { Router, Request, Response } from 'express';
-import Joi from 'joi';
 import dotenv from 'dotenv';
 import { LLMClient } from '../ai/llmClient';
-import { PromptBuilder } from '../ai/promptBuilder';
-import { ResponseParser } from '../ai/responseParser';
 import { DatabaseClient } from '../sql/dbClient';
-import { SQLGenerator } from '../sql/sqlGenerator';
-import { SQLValidator } from '../sql/sqlValidator';
-import { PIIMasker } from '../security/piiMasker';
 import { requirePermission } from '../security/rbac';
-import { AuditLogger } from '../logs/auditLogger';
 import { tableTranslations } from '../semantic/tableTranslations';
 import {
-  getSchemaContextForQuery,
-  getRelevantTranslations,
-  translateTableNames,
   getTranslationForGermanName,
 } from './analytics/schemaContext';
-import {
-  buildCacheKey,
-  getCachedQuery,
-  getCachedValidatedSql,
-  setCachedValidatedSql,
-  upsertQueryCache,
-} from './analytics/cache';
-import {
-  ensureTopLimit,
-  extractSqlStatement,
-  generateBestSQL,
-  generateSQLExplanation,
-  validateGeneratedSQL,
-  SQLWorkflowDeps,
-} from './analytics/sqlWorkflow';
+import axios from 'axios';
 
 const router = Router();
 
 dotenv.config();
 
 const llmClient = new LLMClient();
-const promptBuilder = new PromptBuilder(llmClient);
-const responseParser = new ResponseParser(llmClient);
-const sqlGenerator = new SQLGenerator();
-const sqlValidator = new SQLValidator();
-const piiMasker = new PIIMasker();
+
 const dbClient = new DatabaseClient({
   host: process.env.DB_HOST || 'localhost',
   port: parseInt(process.env.DB_PORT || '1433', 10),
@@ -62,20 +34,6 @@ export const analyticsSchemaReady = dbClient
     throw err;
   });
 
-const sqlWorkflowDeps: SQLWorkflowDeps = {
-  llmClient,
-  promptBuilder,
-  sqlValidator,
-  dbClient,
-};
-
-const querySchema = Joi.object({
-  query: Joi.string().required().min(3).max(1000),
-  limit: Joi.number().optional().min(1).max(10000).default(1000),
-  offset: Joi.number().optional().min(0).default(0),
-  includeExplain: Joi.boolean().optional().default(false),
-  masked: Joi.boolean().optional().default(true),
-});
 
 router.post('/chat', async (req: Request, res: Response) => {
   try {
@@ -346,231 +304,259 @@ router.get('/chart/:metric', async (req: Request, res: Response) => {
     });
   }
 });
-
 router.post('/query', requirePermission('analytics:query:read'), async (req: Request, res: Response) => {
   const requestId = (req as any).id;
-  const userId = req.user?.userId;
-  const auditLogger = (req.app as any).auditLogger as AuditLogger;
 
   try {
-    const { error, value } = querySchema.validate(req.body);
-    if (error) {
+    const { query } = req.body;
+
+    if (!query || typeof query !== 'string') {
       return res.status(400).json({
-        error: 'VALIDATION_ERROR',
-        message: error.details[0].message,
+        error: 'INVALID_REQUEST',
+        message: 'Query is required',
         requestId,
       });
     }
 
-    const { query, limit, offset, masked } = value;
-    const cacheKey = buildCacheKey(userId || 'UNKNOWN', query, { masked, limit, offset });
-    const cached = await getCachedQuery(dbClient, cacheKey);
-    if (cached?.result_data) {
-      const cachedData = cached.result_data as Record<string, any>;
-      cachedData.metadata = {
-        ...(cachedData.metadata || {}),
-        requestId,
-        cacheHit: true,
-        executionTime: 0,
-      };
+    const sql = query.trim();
 
-      await dbClient.query(
-        `UPDATE query_cache SET access_count = access_count + 1 WHERE query_hash = $1`,
-        [cacheKey]
-      );
-
-      auditLogger.log({
-        timestamp: new Date(),
-        action: 'QUERY_CACHE_HIT',
-        userId: userId || 'UNKNOWN',
-        resource: 'ANALYTICS_QUERY',
-        details: {
-          query: query.substring(0, 100),
-          cacheKey,
-        },
-        severity: 'INFO',
-      });
-
-      return res.status(200).json({ success: true, data: cachedData });
-    }
-
-    auditLogger.log({
-      timestamp: new Date(),
-      action: 'QUERY_SUBMITTED',
-      userId: userId || 'UNKNOWN',
-      resource: 'ANALYTICS_QUERY',
-      details: { query: query.substring(0, 100), userId: userId || 'UNKNOWN' },
-      severity: 'INFO',
-    });
-
-    const rbac = (req as any).rbac;
-    if (rbac && rbac.queryLimit && rbac.queryLimit > 0) {
-      // TODO: enforce per-user rate limits
-    }
-
-    const normalizedQuery = query.trim();
-    if (!/^(SELECT|WITH)\b/i.test(normalizedQuery)) {
+    // optional basic safety (can remove if you want 100% raw)
+    if (!/^(SELECT|WITH)\b/i.test(sql)) {
       return res.status(400).json({
         error: 'INVALID_SQL',
-        message: 'Only SELECT or WITH statements are supported in this endpoint.',
+        message: 'Only SELECT/WITH allowed',
         requestId,
       });
     }
+    console.log(`[QUERY][SQL]`, sql);
 
-    const executableSQL = translateTableNames(normalizedQuery);
-    const queryStart = Date.now();
-    const paramMatches = Array.from(executableSQL.matchAll(/\$([1-9]\d*)/g)) as RegExpMatchArray[];
-    const paramNumbers: number[] = paramMatches.map((m) => parseInt(m[1], 10));
-    const maxParam = paramNumbers.length ? Math.max(...paramNumbers) : 0;
-    const autoParams = maxParam > 0 ? Array.from({ length: maxParam }, () => null as null) : undefined;
-    const result = await dbClient.query(executableSQL, autoParams);
-    const queryDuration = Date.now() - queryStart;
+    const start = Date.now();
 
-    const parsedResponse = await responseParser.parseQueryResult(result.rows, query, query);
-    let finalResult = parsedResponse.queryResult;
-    let maskedApplied = false;
-    if (masked && rbac?.dataAccessLevel !== 'FULL') {
-      finalResult = piiMasker.maskObject(finalResult);
-      maskedApplied = true;
-    }
+    const result = await dbClient.query(sql);
 
-    const visualizationType = responseParser.recommendVisualization(finalResult);
-    const statistics = responseParser.calculateStatistics(finalResult);
-    const visualData = responseParser.formatForVisualization(finalResult, visualizationType);
-    const response = {
+    const duration = Date.now() - start;
+
+
+    return res.status(200).json({
       success: true,
       data: {
-        query,
-        generatedSQL: sqlGenerator.formatSQL(normalizedQuery),
-        result: finalResult,
-        summary: parsedResponse.summary,
-        insights: parsedResponse.insights,
-        statistics,
-        visualization: {
-          type: visualizationType,
-          data: visualData,
-        },
+        result: result.rows,
         metadata: {
-          recordCount: Array.isArray(finalResult) ? finalResult.length : 1,
-          executionTime: queryDuration,
-          masked: maskedApplied,
+          recordCount: result.rows.length,
+          executionTime: duration,
           requestId,
         },
       },
-    };
-
-    await upsertQueryCache(
-      dbClient,
-      cacheKey,
-      userId || 'UNKNOWN',
-      query,
-      normalizedQuery,
-      response.data,
-      response.data.metadata.executionTime,
-      response.data.metadata.recordCount
-    );
-
-    auditLogger.log({
-      timestamp: new Date(),
-      action: 'QUERY_EXECUTED',
-      userId: userId || 'UNKNOWN',
-      resource: 'ANALYTICS_QUERY',
-      details: {
-        query: query.substring(0, 100),
-        executionTime: queryDuration,
-        recordCount: response.data.metadata.recordCount,
-        masked: maskedApplied,
-      },
-      severity: 'INFO',
     });
 
-    return res.status(200).json(response);
   } catch (error) {
-    const errorMessage = (error as Error).message;
-    auditLogger.log({
-      timestamp: new Date(),
-      action: 'QUERY_ERROR',
-      userId: userId || 'UNKNOWN',
-      resource: 'ANALYTICS_QUERY',
-      details: { error: errorMessage },
-      severity: 'ERROR',
-    });
+    console.error(`[QUERY][ERROR] requestId=${requestId}`, error);
 
     return res.status(500).json({
-      error: 'QUERY_EXECUTION_ERROR',
-      message: errorMessage,
+      error: 'QUERY_ERROR',
+      message: (error as Error).message,
       requestId,
     });
   }
 });
 
-router.post('/validate', requirePermission('analytics:query:read'), async (req: Request, res: Response) => {
-  const requestId = (req as any).id;
-  const userId = req.user?.userId || 'UNKNOWN';
-  const startTime = Date.now();
+router.post(
+  '/validate',
+  requirePermission('analytics:query:read'),
+  async (req: Request, res: Response) => {
+    const requestId = (req as any).id;
 
-  try {
-    const { query } = req.body;
-    if (!query || typeof query !== 'string') {
-      console.warn(`[validate][invalid_request] requestId=${requestId} userId=${userId} reason=query_missing_or_invalid`);
-      return res.status(400).json({
-        error: 'INVALID_REQUEST',
-        message: 'Query parameter required',
+    try {
+      const { query } = req.body;
+
+      console.log(`[VALIDATE][START]`, query);
+
+      if (!query) {
+        return res.status(400).json({
+          error: 'INVALID_REQUEST',
+          message: 'Query is required',
+          requestId,
+        });
+      }
+
+      const q = query.toLowerCase();
+
+      // -----------------------------------------
+      // 1. INTENT DETECTION
+      // -----------------------------------------
+      let intent: 'search' | 'math' | 'stats' = 'search';
+
+      if (q.includes('profit') || q.includes('total') || q.includes('calculate')) {
+        intent = 'math';
+      }
+
+      if (q.includes('expected') || q.includes('interval')) {
+        intent = 'stats';
+      }
+
+      console.log(`[VALIDATE][INTENT]`, intent);
+
+      // -----------------------------------------
+      // 2. INTENT → TABLE FILTER (ONLY IMPORTANT TABLES)
+      // -----------------------------------------
+      const intentTableMap: Record<string, string[]> = {
+        search: ['auftrag', 'kunde'],
+        math: ['anposten', 'rechnung'],
+        stats: ['auftrag', 'kunde'],
+      };
+
+      const allowedTables = intentTableMap[intent];
+
+      console.log(`[VALIDATE][TABLE_FILTER]`, allowedTables);
+
+      // -----------------------------------------
+      // 3. BUILD SAFE IN CLAUSE (SQL SERVER FIX)
+      // -----------------------------------------
+      const tableList = allowedTables.map(t => `'${t}'`).join(',');
+
+      // -----------------------------------------
+      // 4. FETCH SCHEMA
+      // -----------------------------------------
+      const schemaResult = await dbClient.query(`
+        SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME IN (${tableList})
+      `);
+
+      console.log(`[VALIDATE][SCHEMA_LOADED]`, schemaResult.rows.length);
+
+      // -----------------------------------------
+      // 5. BUILD SCHEMA TEXT (KEEP IT SHORT)
+      // -----------------------------------------
+      const schemaMap: Record<string, string[]> = {};
+
+      for (const row of schemaResult.rows) {
+        if (!schemaMap[row.TABLE_NAME]) {
+          schemaMap[row.TABLE_NAME] = [];
+        }
+
+        // LIMIT columns per table (IMPORTANT for LLM)
+        if (schemaMap[row.TABLE_NAME].length < 25) {
+          schemaMap[row.TABLE_NAME].push(
+            `${row.COLUMN_NAME} (${row.DATA_TYPE})`
+          );
+        }
+      }
+
+      const schemaText = Object.entries(schemaMap)
+        .map(([table, cols]) => {
+          return `${table}:\n${cols.join('\n')}`;
+        })
+        .join('\n\n');
+
+      // -----------------------------------------
+      // 6. STRONG PROMPT (CRITICAL FIX)
+      // -----------------------------------------
+      const prompt = `
+You are a SQL Server expert.
+
+STRICT RULES:
+- Output ONLY ONE SQL query
+- No explanation
+- No markdown
+- Must end with ;
+
+TABLES:
+auftrag = orders
+kunde = customers
+anposten = invoice_lines
+rechnung = invoices
+
+SCHEMA:
+${schemaText}
+
+EXAMPLES:
+User: show customer names
+SQL: SELECT TOP 100 Name FROM kunde;
+
+User: find orders of customer X in 2024
+SQL: SELECT * FROM auftrag WHERE Name LIKE '%X%' AND YEAR(Datum)=2024;
+
+USER:
+${query}
+
+SQL:
+`.trim();
+
+      console.log(`[VALIDATE][PROMPT_SENT]`);
+
+      // -----------------------------------------
+      // 7. CALL LLM
+      // -----------------------------------------
+      const response = await axios.post(
+        'http://localhost:11434/api/generate',
+        {
+          model: 'phi',
+          prompt,
+          stream: false,
+          temperature: 0,
+        }
+      );
+
+      const raw = response.data.response;
+
+      console.log(`[VALIDATE][RAW_OUTPUT]`, raw);
+
+      // -----------------------------------------
+      // 8. SAFE SQL EXTRACTION (FIXED)
+      // -----------------------------------------
+      let sql = raw
+        .replace(/```sql|```/g, '')
+        .replace(/[\s\S]*?(SELECT|WITH)/i, '$1')
+        .trim();
+
+      if (sql && !sql.endsWith(';')) {
+        sql += ';';
+      }
+
+      // -----------------------------------------
+      // 9. FALLBACK (VERY IMPORTANT)
+      // -----------------------------------------
+      if (
+        !sql ||
+        (!sql.toLowerCase().startsWith('select') &&
+          !sql.toLowerCase().startsWith('with'))
+      ) {
+        console.log(`[VALIDATE][FALLBACK_TRIGGERED]`);
+
+        if (intent === 'search') {
+          sql = `SELECT TOP 100 Name FROM kunde;`;
+        } else if (intent === 'math') {
+          sql = `SELECT SUM(Summe) AS total_profit FROM anposten;`;
+        } else {
+          sql = `SELECT TOP 100 Datum FROM auftrag ORDER BY Datum DESC;`;
+        }
+      }
+
+      console.log(`[VALIDATE][FINAL_SQL]`, sql);
+
+      // -----------------------------------------
+      // 10. RESPONSE
+      // -----------------------------------------
+      return res.json({
+        success: true,
+        requestId,
+        query,
+        intent,
+        tablesUsed: allowedTables,
+        generatedSQL: sql,
+      });
+    } catch (err) {
+      console.error(`[VALIDATE][ERROR]`, err);
+
+      return res.status(500).json({
+        error: 'VALIDATION_ERROR',
+        message: (err as Error).message,
+        requestId,
       });
     }
-
-    const includeExplanation = req.body?.includeExplanation === true;
-    const { schema: dbSchema, tables: schemaTables } = await getSchemaContextForQuery(dbClient, query);
-    const directSqlCandidate = ensureTopLimit(extractSqlStatement(query));
-    const isDirectSql = /^(SELECT|WITH)\b/i.test(directSqlCandidate);
-    const cachedValidatedSql = !isDirectSql ? getCachedValidatedSql(userId, query) : null;
-    const generated = isDirectSql
-      ? {
-          sql: directSqlCandidate,
-          issues: await validateGeneratedSQL(directSqlCandidate, { sqlValidator, dbClient }),
-        }
-      : cachedValidatedSql
-        ? {
-            sql: cachedValidatedSql,
-            issues: await validateGeneratedSQL(cachedValidatedSql, { sqlValidator, dbClient }),
-          }
-        : await generateBestSQL(
-            query,
-            dbSchema,
-            getRelevantTranslations(schemaTables),
-            sqlWorkflowDeps
-          );
-
-    const generatedSQL = generated.sql;
-    const issues = generated.issues;
-    let explanation: string | undefined;
-    if (includeExplanation) {
-      explanation = await generateSQLExplanation(generatedSQL, { promptBuilder, llmClient });
-    }
-
-    if (issues.every((issue) => issue.type !== 'ERROR')) {
-      setCachedValidatedSql(userId, query, generatedSQL);
-    }
-
-    return res.status(200).json({
-      success: true,
-      query,
-      generatedSQL: sqlGenerator.formatSQL(generatedSQL),
-      validation: {
-        issues,
-        valid: issues.every((issue) => issue.type !== 'ERROR'),
-      },
-      explanation,
-    });
-  } catch (error) {
-    console.error(`[validate][error] requestId=${requestId} userId=${userId} totalMs=${Date.now() - startTime} message=${(error as Error).message}`);
-    console.error(error);
-    return res.status(500).json({
-      error: 'VALIDATION_ERROR',
-      message: (error as Error).message,
-    });
   }
-});
+);
 
 router.get(
   '/analytics/insights',

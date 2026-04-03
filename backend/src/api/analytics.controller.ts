@@ -1,13 +1,11 @@
 import { Router, Request, Response } from 'express';
 import dotenv from 'dotenv';
 import { LLMClient } from '../ai/llmClient';
-import { DatabaseClient, QueryResult } from '../sql/dbClient';
+import { DatabaseClient } from '../sql/dbClient';
 import { requirePermission } from '../security/rbac';
 import { tableTranslations } from '../semantic/tableTranslations';
 import {
-  getSchemaContextForQuery,
   getTranslationForGermanName,
-  translateTableNames,
 } from './analytics/schemaContext';
 import axios from 'axios';
 
@@ -35,152 +33,11 @@ export const analyticsSchemaReady = dbClient
     console.error('Failed to ensure analytics helper tables', err);
     throw err;
   });
-
-type ValidationIntent = 'search' | 'math' | 'stats';
-
 interface TableColumnInfo {
   columns: string[];
   columnNames: string[];
   numericColumns: string[];
 }
-
-type ColumnMetadataRow = {
-  TABLE_NAME: string;
-  COLUMN_NAME: string;
-  DATA_TYPE: string;
-};
-
-const TABLE_PROMPT_LIMIT = 6;
-
-const intentTableDefaults: Record<ValidationIntent, string[]> = {
-  search: ['auftrag', 'kunde', 'kontakt'],
-  math: ['anposten', 'rechnung', 'artbest', 'auposten', 'lsposten'],
-  stats: ['wartung', 'zeitraum', 'datum', 'kunde'],
-};
-
-const statsIndicators = [
-  'expected',
-  'interval',
-  'maintenance',
-  'forecast',
-  'predict',
-  'trend',
-  'estimate',
-  'frequency',
-  'confidence',
-  'probability',
-  'variance',
-];
-
-const mathIndicators = [
-  'profit',
-  'total',
-  'calculate',
-  'sum',
-  'revenue',
-  'earnings',
-  'cost',
-  'margin',
-  'average',
-  'growth',
-];
-
-function detectIntent(query: string): ValidationIntent {
-  const normalized = query.toLowerCase();
-  if (statsIndicators.some((term) => normalized.includes(term))) {
-    return 'stats';
-  }
-  if (mathIndicators.some((term) => normalized.includes(term))) {
-    return 'math';
-  }
-  return 'search';
-}
-
-function isNumericType(dataType?: string): boolean {
-  if (!dataType) {
-    return false;
-  }
-  const normalized = dataType.toLowerCase();
-  return /^(bigint|int|smallint|tinyint|decimal|numeric|float|real|money|smallmoney)/.test(
-    normalized
-  );
-}
-
-function quoteTableName(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-function buildAliasSection(tables: string[]): string {
-  if (tables.length === 0) {
-    return 'No table aliases available.';
-  }
-
-  return tables
-    .map((table) => {
-      const translation = getTranslationForGermanName(table);
-      const aliasSet = new Set<string>();
-      if (translation?.englishAlias) {
-        aliasSet.add(translation.englishAlias);
-      }
-      translation?.additionalAliases?.forEach((alias) => aliasSet.add(alias));
-      const aliasList = aliasSet.size ? Array.from(aliasSet).join(', ') : table;
-      const description = translation?.description ? ` - ${translation.description}` : '';
-      return `${table} = ${aliasList}${description}`;
-    })
-    .join('\n');
-}
-
-function findNumericColumn(
-  schemaMap: Record<string, TableColumnInfo>,
-  preferredTable: string
-): { table: string; column: string } | null {
-  const primary = schemaMap[preferredTable];
-  if (primary?.numericColumns?.length) {
-    return {
-      table: preferredTable,
-      column: primary.numericColumns[0],
-    };
-  }
-
-  for (const [tableName, info] of Object.entries(schemaMap)) {
-    if (info.numericColumns.length) {
-      return {
-        table: tableName,
-        column: info.numericColumns[0],
-      };
-    }
-  }
-
-  return null;
-}
-
-function buildFallbackSQL(
-  intent: ValidationIntent,
-  table: string,
-  schemaMap: Record<string, TableColumnInfo>
-): string {
-  const tableInfo: TableColumnInfo = schemaMap[table] ?? {
-    columns: [],
-    columnNames: [],
-    numericColumns: [],
-  };
-
-  if (intent === 'math') {
-    const numericCandidate = findNumericColumn(schemaMap, table);
-    if (numericCandidate) {
-      return `SELECT SUM(${numericCandidate.column}) AS computed_value FROM ${numericCandidate.table};`;
-    }
-    if (tableInfo.columnNames.length) {
-      return `SELECT SUM(${tableInfo.columnNames[0]}) AS computed_value FROM ${table};`;
-    }
-    return `SELECT TOP 100 * FROM ${table};`;
-  }
-
-  const selectColumn = tableInfo.columnNames[0] || '*';
-  const orderClause = tableInfo.columnNames[0] ? ` ORDER BY ${selectColumn} DESC` : '';
-  return `SELECT TOP 100 ${selectColumn} FROM ${table}${orderClause};`;
-}
-
 
 router.post('/chat', async (req: Request, res: Response) => {
   try {
@@ -506,204 +363,6 @@ router.post('/query', requirePermission('analytics:query:read'), async (req: Req
     });
   }
 });
-
-router.post(
-  '/validate',
-  requirePermission('analytics:query:read'),
-  async (req: Request, res: Response) => {
-    const requestId = (req as any).id;
-
-    try {
-      const { query } = req.body;
-      const trimmedQuery = typeof query === 'string' ? query.trim() : '';
-
-      console.log(`[VALIDATE][START] requestId=${requestId}`, trimmedQuery);
-
-      if (!trimmedQuery) {
-        return res.status(400).json({
-          error: 'INVALID_REQUEST',
-          message: 'Query is required',
-          requestId,
-        });
-      }
-
-      const intent = detectIntent(trimmedQuery);
-      const translatedQuery = translateTableNames(trimmedQuery);
-      console.log(`[VALIDATE][INTENT] requestId=${requestId}`, intent);
-      console.log(
-        `[VALIDATE][TRANSLATED_QUERY] requestId=${requestId}`,
-        translatedQuery
-      );
-
-      const schemaContext = await getSchemaContextForQuery(dbClient, translatedQuery);
-
-      const tableCandidates = [...schemaContext.tables];
-      for (const fallbackTable of intentTableDefaults[intent]) {
-        if (!tableCandidates.includes(fallbackTable)) {
-          tableCandidates.push(fallbackTable);
-        }
-      }
-
-      let tablesForPrompt = tableCandidates.slice(0, TABLE_PROMPT_LIMIT);
-      if (tablesForPrompt.length === 0) {
-        tablesForPrompt = [...intentTableDefaults.search];
-      }
-
-      console.log(
-        `[VALIDATE][TABLES] requestId=${requestId}`,
-        tablesForPrompt
-      );
-
-      const tableList = tablesForPrompt.map(quoteTableName).join(', ');
-      const schemaQuery = tablesForPrompt.length
-        ? `
-        SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME IN (${tableList})
-      `
-        : null;
-
-      const schemaResult: QueryResult<ColumnMetadataRow> = schemaQuery
-        ? await dbClient.query<ColumnMetadataRow>(schemaQuery)
-        : ({ rows: [] } as QueryResult<ColumnMetadataRow>);
-
-      console.log(
-        `[VALIDATE][SCHEMA_LOADED] requestId=${requestId}`,
-        schemaResult.rows.length,
-        tablesForPrompt
-      );
-
-      const schemaMap: Record<string, TableColumnInfo> = {};
-      tablesForPrompt.forEach((table) => {
-        schemaMap[table] = {
-          columns: [],
-          columnNames: [],
-          numericColumns: [],
-        };
-      });
-
-      schemaResult.rows.forEach((row) => {
-        const tableName = row.TABLE_NAME;
-        if (!tableName) {
-          return;
-        }
-        const bucket = schemaMap[tableName] || {
-          columns: [],
-          columnNames: [],
-          numericColumns: [],
-        };
-
-        if (bucket.columns.length >= 25) {
-          return;
-        }
-
-        bucket.columns.push(`${row.COLUMN_NAME} (${row.DATA_TYPE})`);
-        bucket.columnNames.push(row.COLUMN_NAME);
-        if (isNumericType(row.DATA_TYPE)) {
-          bucket.numericColumns.push(row.COLUMN_NAME);
-        }
-
-        schemaMap[tableName] = bucket;
-      });
-
-      const schemaText = Object.entries(schemaMap)
-        .map(([table, info]) => {
-          const content = info.columns.length
-            ? info.columns.join('\n')
-            : 'No columns available';
-          return `${table}:\n${content}`;
-        })
-        .join('\n\n');
-
-      const schemaSection = [schemaText.trim(), schemaContext.schema?.trim()]
-        .filter(Boolean)
-        .join('\n\n') || 'Schema metadata is unavailable.';
-
-      const aliasSection = buildAliasSection(tablesForPrompt);
-
-      const promptSections = [
-        'You are a SQL Server expert.',
-        'STRICT RULES:\n- Output ONLY ONE SQL query\n- No explanation\n- No markdown\n- Must end with ;',
-        `INTENT: ${intent}`,
-        'KEY DATA SOURCES:',
-        '- search: auftrag = orders, kunde = customers, kontakt = contacts',
-        '- math: anposten = invoice_lines, rechnung = invoices, artbest = item_master',
-        '- stats: wartung = maintenance, zeitraum = time_periods, datum = dates',
-        'TABLE ALIASES:',
-        aliasSection,
-        'SCHEMA CONTEXT:',
-        schemaSection,
-        'USER QUERY:',
-        translatedQuery,
-      ];
-
-      if (translatedQuery !== trimmedQuery) {
-        promptSections.push('Original request:');
-        promptSections.push(trimmedQuery);
-      }
-
-      promptSections.push('SQL:');
-
-      const prompt = promptSections.join('\n\n').trim();
-
-      console.log(`[VALIDATE][PROMPT_SENT] requestId=${requestId}`);
-
-      const response = await axios.post(
-        'http://localhost:11434/api/generate',
-        {
-          model: 'phi',
-          prompt,
-          stream: false,
-          temperature: 0,
-        }
-      );
-
-      const raw = response.data.response;
-
-      console.log(`[VALIDATE][RAW_OUTPUT] requestId=${requestId}`, raw);
-
-      let sql = raw
-        .replace(/```sql|```/g, '')
-        .replace(/[\s\S]*?(SELECT|WITH)/i, '$1')
-        .trim();
-
-      if (sql && !sql.endsWith(';')) {
-        sql += ';';
-      }
-
-      const isValidSql = !!sql && /^(SELECT|WITH)/i.test(sql);
-      if (!isValidSql) {
-        console.log(
-          `[VALIDATE][FALLBACK_TRIGGERED] requestId=${requestId}`,
-          `intent=${intent}`
-        );
-        const fallbackTable =
-          tablesForPrompt[0] || intentTableDefaults.search[0];
-        sql = buildFallbackSQL(intent, fallbackTable, schemaMap);
-      }
-
-      console.log(`[VALIDATE][FINAL_SQL] requestId=${requestId}`, sql);
-
-      return res.json({
-        success: true,
-        requestId,
-        query: trimmedQuery,
-        intent,
-        tablesUsed: tablesForPrompt,
-        generatedSQL: sql,
-      });
-    } catch (err) {
-      console.error(`[VALIDATE][ERROR] requestId=${requestId}`, err);
-
-      return res.status(500).json({
-        error: 'VALIDATION_ERROR',
-        message: (err as Error).message,
-        requestId,
-      });
-    }
-  }
-);
-
 router.get(
   '/analytics/insights',
   requirePermission('analytics:query:read'),
@@ -745,6 +404,493 @@ router.get(
       return res.status(500).json({
         error: 'INSIGHTS_ERROR',
         message: (error as Error).message,
+      });
+    }
+  }
+);
+
+/**
+ * Natural Language → SQL Route
+ * Database: ERP42test (SQL Server / T-SQL)
+ * Supports: English + German queries
+ * Intents: search | math | stats
+ *
+ * KEY FACTS discovered from real schema:
+ *  - NO foreign keys enforced — joins use Kundennumm (varchar) as soft link
+ *  - auftrag.Kundennumm = kunde.Kundennumm  ← correct customer join
+ *  - anposten.Nummer = auftrag.Nummer        ← line items link to order by document number
+ *  - anposten.Rohgewinn = gross profit per line
+ *  - auftrag.Rohgesamt  = total gross profit on order
+ *  - liefer.Wartung     = maintenance flag on deliveries
+ *  - kontakt.Kundennumm = customer contact/interaction log
+ *  - zeitraum           = accounting periods (Monat, Jahr, Anfang)
+ */
+
+
+// ─────────────────────────────────────────────────────────────
+// TYPES
+// ─────────────────────────────────────────────────────────────
+
+type Intent = 'search' | 'math' | 'stats' | 'unknown';
+
+// ─────────────────────────────────────────────────────────────
+// HARDCODED SCHEMA — only the columns that matter for queries
+// Keeps the prompt tight; avoids wasting tokens on RTFID etc.
+// ─────────────────────────────────────────────────────────────
+
+const STATIC_SCHEMA: Record<string, string> = {
+  auftrag: `auftrag (orders):
+  Auftragid (uniqueidentifier) PK
+  Nummer (varchar)             -- order number, links to anposten.Nummer
+  Datum (datetime)             -- order date -> use YEAR(Datum) for year filter
+  Kundennumm (varchar)         -- customer number -> JOIN kunde ON Kundennumm
+  Name (varchar)               -- customer name stored on order
+  Vorname (varchar)
+  Projekt (varchar)
+  Summe (decimal)              -- net order total
+  Bruttosumm (decimal)         -- gross order total
+  Rohgesamt (decimal)          -- gross profit total
+  Mwst (decimal)               -- VAT
+  Erstellt (datetime)          -- created date`,
+
+  kunde: `kunde (customers):
+  Kundenid (uniqueidentifier) PK
+  Kundennumm (varchar)         -- customer number -> JOIN auftrag/rechnung/kontakt ON Kundennumm
+  Name (varchar)               -- company/customer name -> use LIKE '%X%' for search
+  Vorname (varchar)
+  Matchcode (varchar)          -- short search code
+  Ort (varchar)                -- city
+  Land (varchar)               -- country
+  Email (varchar)
+  Telefon (varchar)
+  Branche (varchar)            -- industry
+  Umsatzgepl (decimal)         -- planned revenue`,
+
+  kontakt: `kontakt (customer contacts/interactions):
+  Kontaktid (uniqueidentifier) PK
+  Kundennumm (varchar)         -- -> JOIN kunde ON Kundennumm
+  Datum (datetime)             -- contact date
+  Art (varchar)                -- contact type
+  Grund (varchar)              -- reason/topic
+  Uhrzeit (datetime)           -- start time
+  Bis (datetime)               -- end time -> interval = DATEDIFF(minute,Uhrzeit,Bis)
+  Erledigt (varchar)           -- done flag
+  Bearbeiter (varchar)         -- staff member`,
+
+  rechnung: `rechnung (invoices):
+  Rechnungid (uniqueidentifier) PK
+  Nummer (varchar)             -- invoice number -> links to reposten.Nummer
+  Datum (datetime)             -- invoice date
+  Kundennumm (varchar)         -- -> JOIN kunde ON Kundennumm
+  Name (varchar)
+  Summe (decimal)              -- net total
+  Bruttosumm (decimal)
+  Rohgesamt (decimal)          -- gross profit
+  Mwst (decimal)
+  Faelligam (datetime)         -- due date`,
+
+  anposten: `anposten (order line items):
+  Postenid (uniqueidentifier) PK
+  Nummer (varchar)             -- document number -> JOIN auftrag ON Nummer
+  Artikelnum (varchar)         -- article number -> JOIN artbest ON Artikelnum
+  Bezeichnun (varchar)         -- product description -> LIKE '%Y%' for product search
+  Datum (datetime)
+  Anzahl (decimal)             -- quantity
+  Einzelprei (decimal)         -- unit price
+  Betrag (decimal)             -- line amount
+  Summe (decimal)              -- net line total
+  Rohgewinn (decimal)          -- GROSS PROFIT per line <- use for profit queries
+  Rohgewinnp (decimal)         -- gross profit %
+  Ekmittel (decimal)           -- avg purchase cost
+  Kundennumm (varchar)         -- customer number (denormalized)
+  Rabatt (decimal)             -- discount %`,
+
+  reposten: `reposten (invoice line items):
+  Postenid (uniqueidentifier) PK
+  Nummer (varchar)             -- invoice number -> JOIN rechnung ON Nummer
+  Artikelnum (varchar)         -- -> JOIN artbest ON Artikelnum
+  Bezeichnun (varchar)         -- product description
+  Datum (datetime)
+  Anzahl (decimal)
+  Einzelprei (decimal)
+  Betrag (decimal)
+  Summe (decimal)
+  Rohgewinn (decimal)          -- GROSS PROFIT per line
+  Rohgewinnp (decimal)
+  Kundennumm (varchar)`,
+
+  artbest: `artbest (item master / stock):
+  Artbestid (uniqueidentifier) PK
+  Artikelnum (varchar)         -- article number (unique key)
+  Datum (datetime)
+  Anzahl (decimal)             -- stock quantity
+  Einkauf (decimal)            -- purchase price
+  Verkauf (decimal)            -- sales price
+  Inventur (decimal)
+  Auftrag (decimal)            -- qty on order`,
+
+  liefer: `liefer (deliveries):
+  Liefersche (uniqueidentifier) PK
+  Nummer (varchar)
+  Datum (datetime)
+  Kundennumm (varchar)         -- -> JOIN kunde ON Kundennumm
+  Name (varchar)
+  Wartung (varchar)            -- MAINTENANCE FLAG: 'J' = yes
+  Summe (decimal)
+  Lieferdatu (datetime)        -- actual delivery date
+  Wunschterm (datetime)        -- requested delivery date
+  Terminbest (datetime)        -- confirmed delivery date`,
+
+  zeitraum: `zeitraum (accounting time periods):
+  Zeitraumid (uniqueidentifier) PK
+  Zeitraum (varchar)           -- period label e.g. '2024-01'
+  Monat (int)                  -- month 1-12
+  Jahr (int)                   -- year e.g. 2024
+  Anfang (datetime)            -- period start date
+  Verboten (varchar)           -- locked flag`,
+
+  bestatus: `bestatus (document status):
+  ID (uniqueidentifier) PK
+  Belegid (uniqueidentifier)   -- links to order/delivery/invoice PK
+  Formart (varchar)            -- document type
+  Druck (varchar)              -- printed flag
+  Lieferbar (varchar)          -- deliverable flag`,
+};
+
+const ALL_KNOWN_TABLES = Object.keys(STATIC_SCHEMA);
+
+// ─────────────────────────────────────────────────────────────
+// HARDCODED JOIN CONDITIONS
+// ─────────────────────────────────────────────────────────────
+
+const JOIN_RULES = `JOINS -- use EXACTLY these, never guess column names:
+  auftrag  -> kunde    : auftrag.Kundennumm = kunde.Kundennumm
+  rechnung -> kunde    : rechnung.Kundennumm = kunde.Kundennumm
+  liefer   -> kunde    : liefer.Kundennumm = kunde.Kundennumm
+  kontakt  -> kunde    : kontakt.Kundennumm = kunde.Kundennumm
+  anposten -> auftrag  : anposten.Nummer = auftrag.Nummer
+  reposten -> rechnung : reposten.Nummer = rechnung.Nummer
+  anposten -> artbest  : anposten.Artikelnum = artbest.Artikelnum
+  reposten -> artbest  : reposten.Artikelnum = artbest.Artikelnum
+  bestatus -> auftrag  : bestatus.Belegid = auftrag.Auftragid`;
+
+// ─────────────────────────────────────────────────────────────
+// SEMANTIC HINTS
+// ─────────────────────────────────────────────────────────────
+
+const SEMANTIC_HINTS = `COLUMN SEMANTICS:
+  customer name search  -> kunde.Name LIKE '%X%'
+  order date filter     -> YEAR(auftrag.Datum) = 2024
+  product search        -> anposten.Bezeichnun LIKE '%Y%'
+  profit (order total)  -> auftrag.Rohgesamt
+  profit (line items)   -> anposten.Rohgewinn (SUM for total)
+  profit (invoice)      -> rechnung.Rohgesamt or reposten.Rohgewinn
+  maintenance records   -> liefer WHERE Wartung = 'J'
+  contact interval      -> DATEDIFF(day, kontakt.Datum, LEAD(kontakt.Datum) OVER ...)
+  accounting period     -> zeitraum.Jahr, zeitraum.Monat`;
+
+// ─────────────────────────────────────────────────────────────
+// INTENT DETECTION
+// ─────────────────────────────────────────────────────────────
+
+type IntentConfig = { pattern: RegExp; tables: string[] };
+
+const INTENT_CONFIG: Record<Intent, IntentConfig> = {
+  math: {
+    pattern: /\b(total|sum|profit|revenue|cost|calculate|calc|average|avg|count|amount|earn|margin|how much|wie viel|gesamt|summe|gewinn|umsatz|kosten|berechne|ertrag|marge|einnahmen|ausgaben|rohgewinn)\b/i,
+    tables: ['anposten', 'rechnung', 'reposten', 'auftrag'],
+  },
+  stats: {
+    pattern: /\b(statistics|stats|average|mean|interval|maintenance|expected|trend|frequency|distribution|analyze|analyse|wartung|intervall|erwart|haufigkeit|statistik|mittelwert|verteilung|prognose|durchschnitt)\b/i,
+    tables: ['kontakt', 'liefer', 'zeitraum', 'artbest'],
+  },
+  search: {
+    pattern: /\b(find|search|show|list|get|where|who|which|all|filter|look|finde|suche|zeige|liste|welche|alle|wo|wer|zeig|gib)\b/i,
+    tables: ['auftrag', 'kunde', 'rechnung', 'liefer'],
+  },
+  unknown: {
+    pattern: /.*/,
+    tables: ['auftrag', 'kunde'],
+  },
+};
+
+function detectIntent(query: string): Intent {
+  for (const intent of (['math', 'stats', 'search'] as Intent[])) {
+    if (INTENT_CONFIG[intent].pattern.test(query)) return intent;
+  }
+  return 'unknown';
+}
+
+// ─────────────────────────────────────────────────────────────
+// TABLE DETECTION FROM QUERY
+// ─────────────────────────────────────────────────────────────
+
+const TABLE_KEYWORDS: Record<string, string[]> = {
+  auftrag:  ['auftrag', 'auftr', 'order', 'orders', 'bestellung'],
+  kunde:    ['kunde', 'kunden', 'customer', 'customers', 'client', 'firma'],
+  kontakt:  ['kontakt', 'kontakte', 'contact', 'contacts', 'interaction'],
+  rechnung: ['rechnung', 'rechnungen', 'invoice', 'invoices', 'faktura'],
+  anposten: ['anposten', 'order line', 'auftragsposten'],
+  reposten: ['reposten', 'invoice line', 'rechnungsposten'],
+  artbest:  ['artbest', 'artikel', 'article', 'product', 'products', 'item', 'items', 'software'],
+  liefer:   ['liefer', 'lieferung', 'delivery', 'deliveries', 'wartung', 'maintenance'],
+  zeitraum: ['zeitraum', 'period', 'monat', 'month', 'quartal', 'quarter'],
+  bestatus: ['bestatus', 'status'],
+};
+
+function detectTablesFromQuery(query: string): string[] {
+  const lower = query.toLowerCase();
+  const found = new Set<string>();
+  for (const [table, keywords] of Object.entries(TABLE_KEYWORDS)) {
+    for (const kw of keywords) {
+      if (lower.includes(kw)) { found.add(table); break; }
+    }
+  }
+  return [...found];
+}
+
+// ─────────────────────────────────────────────────────────────
+// FALLBACK SQL
+// ─────────────────────────────────────────────────────────────
+
+function buildFallbackSQL(intent: Intent, primaryTable: string): string {
+  switch (intent) {
+    case 'math':
+      if (primaryTable === 'anposten' || primaryTable === 'reposten') {
+        return `SELECT SUM(Rohgewinn) AS total_profit, SUM(Betrag) AS total_revenue, COUNT(*) AS line_count FROM ${primaryTable};`;
+      }
+      return `SELECT SUM(Rohgesamt) AS total_profit, SUM(Summe) AS total_revenue, COUNT(*) AS order_count FROM auftrag;`;
+    case 'stats':
+      if (primaryTable === 'kontakt') {
+        return `SELECT AVG(DATEDIFF(minute, Uhrzeit, Bis)) AS avg_duration_min, COUNT(*) AS total_contacts FROM kontakt WHERE Uhrzeit IS NOT NULL AND Bis IS NOT NULL;`;
+      }
+      if (primaryTable === 'liefer') {
+        return `SELECT COUNT(*) AS total_deliveries, SUM(CASE WHEN Wartung = 'J' THEN 1 ELSE 0 END) AS maintenance_count FROM liefer;`;
+      }
+      return `SELECT COUNT(*) AS record_count FROM ${primaryTable};`;
+    case 'search':
+    default:
+      return `SELECT TOP 100 * FROM ${primaryTable} ORDER BY Datum DESC;`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// SQL EXTRACTION — bulletproof
+// ─────────────────────────────────────────────────────────────
+
+function scoreSQLCandidate(candidate: string): number {
+  let score = 0;
+  const lower = candidate.toLowerCase();
+  if (/\bfrom\b/.test(lower)) score += 3;
+  if (/\bjoin\b/.test(lower)) score += 2;
+  if (/\bwhere\b/.test(lower)) score += 1;
+  if (/\border\s+by\b/.test(lower)) score += 1;
+  score += Math.min(1, candidate.length / 200);
+  return score;
+}
+
+function extractSQL(raw: string): string {
+  if (!raw?.trim()) return '';
+
+  let text = raw
+    .replace(/\r\n/g, '\n')
+    .replace(/```sql\s*/gi, '')
+    .replace(/```\s*/g, '')
+    .replace(/^(here'?s?( the| a| my)?( sql| query| answer)?[:\-]?\s*)$/gim, '')
+    .replace(/^(sql[:\-]\s*)$/gim, '')
+    .replace(/^(note[:\-].*)$/gim, '')
+    .replace(/^(this query.*)$/gim, '')
+    .replace(/^(the (above|following|query).*)$/gim, '')
+    .replace(/\b(assistant|user):\s*/gi, '')
+    .trim();
+
+  text = text
+    .replace(/--[^\n]*/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\n{3,}/g, '\n')
+    .trim();
+
+  const statementRegex = /(SELECT|WITH)[\s\S]*?;/gi;
+  const statements: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = statementRegex.exec(text)) !== null) {
+    statements.push(match[0].trim());
+  }
+
+  if (statements.length === 0) return '';
+
+  const best = statements.reduce(
+    (bestSoFar, current) => {
+      const score = scoreSQLCandidate(current);
+      return score > bestSoFar.score ? { statement: current, score } : bestSoFar;
+    },
+    { statement: '', score: -Infinity }
+  );
+
+  let bestStatement = best.statement.trim();
+  if (bestStatement && !bestStatement.endsWith(';')) bestStatement += ';';
+  return bestStatement;
+}
+
+// ─────────────────────────────────────────────────────────────
+// PROMPT BUILDER
+// ─────────────────────────────────────────────────────────────
+
+const INTENT_EXAMPLES: Record<Intent, string> = {
+  search: `-- EXAMPLE:
+-- Q: find all orders of customer Dieckmann from 2024
+SELECT TOP 100 a.Nummer, a.Datum, a.Name, a.Summe, a.Rohgesamt
+FROM auftrag a
+JOIN kunde k ON a.Kundennumm = k.Kundennumm
+WHERE k.Name LIKE '%Dieckmann%'
+  AND YEAR(a.Datum) = 2024
+ORDER BY a.Datum DESC;`,
+
+  math: `-- EXAMPLE:
+-- Q: calculate total profit for Software Pro in 2025
+SELECT SUM(ap.Rohgewinn) AS total_profit, SUM(ap.Betrag) AS total_revenue, COUNT(*) AS lines
+FROM anposten ap
+WHERE ap.Bezeichnun LIKE '%Software Pro%'
+  AND YEAR(ap.Datum) = 2025;`,
+
+  stats: `-- EXAMPLE:
+-- Q: what is the expected maintenance interval for company Acme
+SELECT
+  kd.Name,
+  COUNT(*) AS total_deliveries,
+  AVG(DATEDIFF(day, l.Datum, l.Lieferdatu)) AS avg_delivery_days
+FROM liefer l
+JOIN kunde kd ON l.Kundennumm = kd.Kundennumm
+WHERE kd.Name LIKE '%Acme%'
+  AND l.Wartung = 'J'
+GROUP BY kd.Name;`,
+
+  unknown: `-- EXAMPLE:
+-- Q: show recent orders
+SELECT TOP 100 * FROM auftrag ORDER BY Datum DESC;`,
+};
+
+const INTENT_INSTRUCTIONS: Record<Intent, string> = {
+  search:  'SELECT with WHERE/JOIN to filter. Use TOP 100. LIKE with % for names. YEAR() for year filters.',
+  math:    'SELECT with SUM/AVG/COUNT. Use Rohgewinn for profit, Betrag/Summe for revenue.',
+  stats:   'SELECT with AVG/MIN/MAX/COUNT/DATEDIFF. Maintenance: liefer.Wartung = \'J\'. Intervals: DATEDIFF on dates.',
+  unknown: 'SELECT that best answers the question.',
+};
+
+function buildPrompt(intent: Intent, query: string, schemaForPrompt: string): string {
+  return [
+    '-- T-SQL expert. Output ONE SQL query only. No markdown. No explanation.',
+    '-- Start with SELECT or WITH. End with semicolon (;).',
+    '',
+    `-- INTENT: ${intent.toUpperCase()} -- ${INTENT_INSTRUCTIONS[intent]}`,
+    '',
+    JOIN_RULES,
+    '',
+    SEMANTIC_HINTS,
+    '',
+    '-- SCHEMA:',
+    schemaForPrompt,
+    '',
+    INTENT_EXAMPLES[intent],
+    '',
+    `-- NOW ANSWER: ${query}`,
+    'SELECT',
+  ].join('\n');
+}
+
+// ─────────────────────────────────────────────────────────────
+// ROUTE
+// ─────────────────────────────────────────────────────────────
+
+const TABLE_PROMPT_LIMIT = 5;
+
+router.post(
+  '/validate',
+  requirePermission('analytics:query:read'),
+  async (req: Request, res: Response) => {
+    const requestId = (req as any).id;
+
+    try {
+      const { query } = req.body;
+      const trimmedQuery = typeof query === 'string' ? query.trim() : '';
+
+      if (!trimmedQuery) {
+        return res.status(400).json({ error: 'INVALID_REQUEST', message: 'Query is required', requestId });
+      }
+
+      console.log(`[VALIDATE][START] requestId=${requestId} query="${trimmedQuery}"`);
+
+      // Detect intent
+      const intent = detectIntent(trimmedQuery);
+      console.log(`[VALIDATE][INTENT] requestId=${requestId} intent=${intent}`);
+
+      // Select tables
+      const mentionedTables = detectTablesFromQuery(trimmedQuery);
+      const defaultTables = INTENT_CONFIG[intent].tables;
+      const tableCandidates: string[] = [...mentionedTables];
+      for (const t of defaultTables) {
+        if (!tableCandidates.includes(t)) tableCandidates.push(t);
+      }
+      const tablesForPrompt = tableCandidates
+        .filter(t => ALL_KNOWN_TABLES.includes(t))
+        .slice(0, TABLE_PROMPT_LIMIT);
+
+      console.log(`[VALIDATE][TABLES] requestId=${requestId}`, tablesForPrompt);
+
+      // Build schema + prompt
+      const schemaForPrompt = tablesForPrompt.map(t => STATIC_SCHEMA[t]).join('\n\n');
+      const prompt = buildPrompt(intent, trimmedQuery, schemaForPrompt);
+      console.log(`[VALIDATE][PROMPT_SENT] requestId=${requestId} chars=${prompt.length}`);
+
+      // Call LLM
+      const llmResponse = await axios.post(
+        'http://localhost:11434/api/generate',
+        {
+          model: 'phi',
+          prompt,
+          stream: false,
+          temperature: 0,
+          options: {
+            num_predict: 400,
+            // Do NOT use \n\n as stop token — it truncates multi-line SQL mid-value (caused the "= 202" bug)
+            stop: ['\nNote:', '\nExplanation:', '\nThis query', '\nThe query', '\n--\n', '\nQuestion:'],
+          },
+        },
+        { timeout: 30_000 }
+      );
+
+      const raw: string = llmResponse.data?.response ?? '';
+      console.log(`[VALIDATE][RAW_OUTPUT] requestId=${requestId}`, raw.slice(0, 400));
+
+      // The prompt ends with "SELECT" so model continues from there
+      // Prepend SELECT back since model won't re-emit it
+      const rawWithPrefix = /^\s*(SELECT|WITH)\b/i.test(raw) ? raw : 'SELECT ' + raw;
+      let sql = extractSQL(rawWithPrefix);
+      const isValidSQL = /^(SELECT|WITH)\b/i.test(sql) && sql.length > 15;
+
+      if (!isValidSQL) {
+        console.warn(`[VALIDATE][FALLBACK] requestId=${requestId} raw="${raw.slice(0, 80)}"`);
+        sql = buildFallbackSQL(intent, tablesForPrompt[0] ?? 'auftrag');
+      }
+
+      console.log(`[VALIDATE][FINAL_SQL] requestId=${requestId}`, sql);
+
+      return res.json({
+        success: true,
+        requestId,
+        query: trimmedQuery,
+        intent,
+        tablesUsed: tablesForPrompt,
+        generatedSQL: sql,
+        usedFallback: !isValidSQL,
+      });
+
+    } catch (err) {
+      console.error(`[VALIDATE][ERROR] requestId=${requestId}`, err);
+      return res.status(500).json({
+        error: 'VALIDATION_ERROR',
+        message: (err as Error).message,
+        requestId,
       });
     }
   }

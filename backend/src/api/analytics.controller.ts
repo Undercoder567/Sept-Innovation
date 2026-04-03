@@ -1,11 +1,13 @@
 import { Router, Request, Response } from 'express';
 import dotenv from 'dotenv';
 import { LLMClient } from '../ai/llmClient';
-import { DatabaseClient } from '../sql/dbClient';
+import { DatabaseClient, QueryResult } from '../sql/dbClient';
 import { requirePermission } from '../security/rbac';
 import { tableTranslations } from '../semantic/tableTranslations';
 import {
+  getSchemaContextForQuery,
   getTranslationForGermanName,
+  translateTableNames,
 } from './analytics/schemaContext';
 import axios from 'axios';
 
@@ -33,6 +35,151 @@ export const analyticsSchemaReady = dbClient
     console.error('Failed to ensure analytics helper tables', err);
     throw err;
   });
+
+type ValidationIntent = 'search' | 'math' | 'stats';
+
+interface TableColumnInfo {
+  columns: string[];
+  columnNames: string[];
+  numericColumns: string[];
+}
+
+type ColumnMetadataRow = {
+  TABLE_NAME: string;
+  COLUMN_NAME: string;
+  DATA_TYPE: string;
+};
+
+const TABLE_PROMPT_LIMIT = 6;
+
+const intentTableDefaults: Record<ValidationIntent, string[]> = {
+  search: ['auftrag', 'kunde', 'kontakt'],
+  math: ['anposten', 'rechnung', 'artbest', 'auposten', 'lsposten'],
+  stats: ['wartung', 'zeitraum', 'datum', 'kunde'],
+};
+
+const statsIndicators = [
+  'expected',
+  'interval',
+  'maintenance',
+  'forecast',
+  'predict',
+  'trend',
+  'estimate',
+  'frequency',
+  'confidence',
+  'probability',
+  'variance',
+];
+
+const mathIndicators = [
+  'profit',
+  'total',
+  'calculate',
+  'sum',
+  'revenue',
+  'earnings',
+  'cost',
+  'margin',
+  'average',
+  'growth',
+];
+
+function detectIntent(query: string): ValidationIntent {
+  const normalized = query.toLowerCase();
+  if (statsIndicators.some((term) => normalized.includes(term))) {
+    return 'stats';
+  }
+  if (mathIndicators.some((term) => normalized.includes(term))) {
+    return 'math';
+  }
+  return 'search';
+}
+
+function isNumericType(dataType?: string): boolean {
+  if (!dataType) {
+    return false;
+  }
+  const normalized = dataType.toLowerCase();
+  return /^(bigint|int|smallint|tinyint|decimal|numeric|float|real|money|smallmoney)/.test(
+    normalized
+  );
+}
+
+function quoteTableName(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function buildAliasSection(tables: string[]): string {
+  if (tables.length === 0) {
+    return 'No table aliases available.';
+  }
+
+  return tables
+    .map((table) => {
+      const translation = getTranslationForGermanName(table);
+      const aliasSet = new Set<string>();
+      if (translation?.englishAlias) {
+        aliasSet.add(translation.englishAlias);
+      }
+      translation?.additionalAliases?.forEach((alias) => aliasSet.add(alias));
+      const aliasList = aliasSet.size ? Array.from(aliasSet).join(', ') : table;
+      const description = translation?.description ? ` - ${translation.description}` : '';
+      return `${table} = ${aliasList}${description}`;
+    })
+    .join('\n');
+}
+
+function findNumericColumn(
+  schemaMap: Record<string, TableColumnInfo>,
+  preferredTable: string
+): { table: string; column: string } | null {
+  const primary = schemaMap[preferredTable];
+  if (primary?.numericColumns?.length) {
+    return {
+      table: preferredTable,
+      column: primary.numericColumns[0],
+    };
+  }
+
+  for (const [tableName, info] of Object.entries(schemaMap)) {
+    if (info.numericColumns.length) {
+      return {
+        table: tableName,
+        column: info.numericColumns[0],
+      };
+    }
+  }
+
+  return null;
+}
+
+function buildFallbackSQL(
+  intent: ValidationIntent,
+  table: string,
+  schemaMap: Record<string, TableColumnInfo>
+): string {
+  const tableInfo: TableColumnInfo = schemaMap[table] ?? {
+    columns: [],
+    columnNames: [],
+    numericColumns: [],
+  };
+
+  if (intent === 'math') {
+    const numericCandidate = findNumericColumn(schemaMap, table);
+    if (numericCandidate) {
+      return `SELECT SUM(${numericCandidate.column}) AS computed_value FROM ${numericCandidate.table};`;
+    }
+    if (tableInfo.columnNames.length) {
+      return `SELECT SUM(${tableInfo.columnNames[0]}) AS computed_value FROM ${table};`;
+    }
+    return `SELECT TOP 100 * FROM ${table};`;
+  }
+
+  const selectColumn = tableInfo.columnNames[0] || '*';
+  const orderClause = tableInfo.columnNames[0] ? ` ORDER BY ${selectColumn} DESC` : '';
+  return `SELECT TOP 100 ${selectColumn} FROM ${table}${orderClause};`;
+}
 
 
 router.post('/chat', async (req: Request, res: Response) => {
@@ -368,10 +515,11 @@ router.post(
 
     try {
       const { query } = req.body;
+      const trimmedQuery = typeof query === 'string' ? query.trim() : '';
 
-      console.log(`[VALIDATE][START]`, query);
+      console.log(`[VALIDATE][START] requestId=${requestId}`, trimmedQuery);
 
-      if (!query) {
+      if (!trimmedQuery) {
         return res.status(400).json({
           error: 'INVALID_REQUEST',
           message: 'Query is required',
@@ -379,115 +527,127 @@ router.post(
         });
       }
 
-      const q = query.toLowerCase();
+      const intent = detectIntent(trimmedQuery);
+      const translatedQuery = translateTableNames(trimmedQuery);
+      console.log(`[VALIDATE][INTENT] requestId=${requestId}`, intent);
+      console.log(
+        `[VALIDATE][TRANSLATED_QUERY] requestId=${requestId}`,
+        translatedQuery
+      );
 
-      // -----------------------------------------
-      // 1. INTENT DETECTION
-      // -----------------------------------------
-      let intent: 'search' | 'math' | 'stats' = 'search';
+      const schemaContext = await getSchemaContextForQuery(dbClient, translatedQuery);
 
-      if (q.includes('profit') || q.includes('total') || q.includes('calculate')) {
-        intent = 'math';
+      const tableCandidates = [...schemaContext.tables];
+      for (const fallbackTable of intentTableDefaults[intent]) {
+        if (!tableCandidates.includes(fallbackTable)) {
+          tableCandidates.push(fallbackTable);
+        }
       }
 
-      if (q.includes('expected') || q.includes('interval')) {
-        intent = 'stats';
+      let tablesForPrompt = tableCandidates.slice(0, TABLE_PROMPT_LIMIT);
+      if (tablesForPrompt.length === 0) {
+        tablesForPrompt = [...intentTableDefaults.search];
       }
 
-      console.log(`[VALIDATE][INTENT]`, intent);
+      console.log(
+        `[VALIDATE][TABLES] requestId=${requestId}`,
+        tablesForPrompt
+      );
 
-      // -----------------------------------------
-      // 2. INTENT → TABLE FILTER (ONLY IMPORTANT TABLES)
-      // -----------------------------------------
-      const intentTableMap: Record<string, string[]> = {
-        search: ['auftrag', 'kunde'],
-        math: ['anposten', 'rechnung'],
-        stats: ['auftrag', 'kunde'],
-      };
-
-      const allowedTables = intentTableMap[intent];
-
-      console.log(`[VALIDATE][TABLE_FILTER]`, allowedTables);
-
-      // -----------------------------------------
-      // 3. BUILD SAFE IN CLAUSE (SQL SERVER FIX)
-      // -----------------------------------------
-      const tableList = allowedTables.map(t => `'${t}'`).join(',');
-
-      // -----------------------------------------
-      // 4. FETCH SCHEMA
-      // -----------------------------------------
-      const schemaResult = await dbClient.query(`
+      const tableList = tablesForPrompt.map(quoteTableName).join(', ');
+      const schemaQuery = tablesForPrompt.length
+        ? `
         SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
         FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_NAME IN (${tableList})
-      `);
+      `
+        : null;
 
-      console.log(`[VALIDATE][SCHEMA_LOADED]`, schemaResult.rows.length);
+      const schemaResult: QueryResult<ColumnMetadataRow> = schemaQuery
+        ? await dbClient.query<ColumnMetadataRow>(schemaQuery)
+        : ({ rows: [] } as QueryResult<ColumnMetadataRow>);
 
-      // -----------------------------------------
-      // 5. BUILD SCHEMA TEXT (KEEP IT SHORT)
-      // -----------------------------------------
-      const schemaMap: Record<string, string[]> = {};
+      console.log(
+        `[VALIDATE][SCHEMA_LOADED] requestId=${requestId}`,
+        schemaResult.rows.length,
+        tablesForPrompt
+      );
 
-      for (const row of schemaResult.rows) {
-        if (!schemaMap[row.TABLE_NAME]) {
-          schemaMap[row.TABLE_NAME] = [];
+      const schemaMap: Record<string, TableColumnInfo> = {};
+      tablesForPrompt.forEach((table) => {
+        schemaMap[table] = {
+          columns: [],
+          columnNames: [],
+          numericColumns: [],
+        };
+      });
+
+      schemaResult.rows.forEach((row) => {
+        const tableName = row.TABLE_NAME;
+        if (!tableName) {
+          return;
+        }
+        const bucket = schemaMap[tableName] || {
+          columns: [],
+          columnNames: [],
+          numericColumns: [],
+        };
+
+        if (bucket.columns.length >= 25) {
+          return;
         }
 
-        // LIMIT columns per table (IMPORTANT for LLM)
-        if (schemaMap[row.TABLE_NAME].length < 25) {
-          schemaMap[row.TABLE_NAME].push(
-            `${row.COLUMN_NAME} (${row.DATA_TYPE})`
-          );
+        bucket.columns.push(`${row.COLUMN_NAME} (${row.DATA_TYPE})`);
+        bucket.columnNames.push(row.COLUMN_NAME);
+        if (isNumericType(row.DATA_TYPE)) {
+          bucket.numericColumns.push(row.COLUMN_NAME);
         }
-      }
+
+        schemaMap[tableName] = bucket;
+      });
 
       const schemaText = Object.entries(schemaMap)
-        .map(([table, cols]) => {
-          return `${table}:\n${cols.join('\n')}`;
+        .map(([table, info]) => {
+          const content = info.columns.length
+            ? info.columns.join('\n')
+            : 'No columns available';
+          return `${table}:\n${content}`;
         })
         .join('\n\n');
 
-      // -----------------------------------------
-      // 6. STRONG PROMPT (CRITICAL FIX)
-      // -----------------------------------------
-      const prompt = `
-You are a SQL Server expert.
+      const schemaSection = [schemaText.trim(), schemaContext.schema?.trim()]
+        .filter(Boolean)
+        .join('\n\n') || 'Schema metadata is unavailable.';
 
-STRICT RULES:
-- Output ONLY ONE SQL query
-- No explanation
-- No markdown
-- Must end with ;
+      const aliasSection = buildAliasSection(tablesForPrompt);
 
-TABLES:
-auftrag = orders
-kunde = customers
-anposten = invoice_lines
-rechnung = invoices
+      const promptSections = [
+        'You are a SQL Server expert.',
+        'STRICT RULES:\n- Output ONLY ONE SQL query\n- No explanation\n- No markdown\n- Must end with ;',
+        `INTENT: ${intent}`,
+        'KEY DATA SOURCES:',
+        '- search: auftrag = orders, kunde = customers, kontakt = contacts',
+        '- math: anposten = invoice_lines, rechnung = invoices, artbest = item_master',
+        '- stats: wartung = maintenance, zeitraum = time_periods, datum = dates',
+        'TABLE ALIASES:',
+        aliasSection,
+        'SCHEMA CONTEXT:',
+        schemaSection,
+        'USER QUERY:',
+        translatedQuery,
+      ];
 
-SCHEMA:
-${schemaText}
+      if (translatedQuery !== trimmedQuery) {
+        promptSections.push('Original request:');
+        promptSections.push(trimmedQuery);
+      }
 
-EXAMPLES:
-User: show customer names
-SQL: SELECT TOP 100 Name FROM kunde;
+      promptSections.push('SQL:');
 
-User: find orders of customer X in 2024
-SQL: SELECT * FROM auftrag WHERE Name LIKE '%X%' AND YEAR(Datum)=2024;
+      const prompt = promptSections.join('\n\n').trim();
 
-USER:
-${query}
+      console.log(`[VALIDATE][PROMPT_SENT] requestId=${requestId}`);
 
-SQL:
-`.trim();
-
-      console.log(`[VALIDATE][PROMPT_SENT]`);
-
-      // -----------------------------------------
-      // 7. CALL LLM
-      // -----------------------------------------
       const response = await axios.post(
         'http://localhost:11434/api/generate',
         {
@@ -500,11 +660,8 @@ SQL:
 
       const raw = response.data.response;
 
-      console.log(`[VALIDATE][RAW_OUTPUT]`, raw);
+      console.log(`[VALIDATE][RAW_OUTPUT] requestId=${requestId}`, raw);
 
-      // -----------------------------------------
-      // 8. SAFE SQL EXTRACTION (FIXED)
-      // -----------------------------------------
       let sql = raw
         .replace(/```sql|```/g, '')
         .replace(/[\s\S]*?(SELECT|WITH)/i, '$1')
@@ -514,40 +671,29 @@ SQL:
         sql += ';';
       }
 
-      // -----------------------------------------
-      // 9. FALLBACK (VERY IMPORTANT)
-      // -----------------------------------------
-      if (
-        !sql ||
-        (!sql.toLowerCase().startsWith('select') &&
-          !sql.toLowerCase().startsWith('with'))
-      ) {
-        console.log(`[VALIDATE][FALLBACK_TRIGGERED]`);
-
-        if (intent === 'search') {
-          sql = `SELECT TOP 100 Name FROM kunde;`;
-        } else if (intent === 'math') {
-          sql = `SELECT SUM(Summe) AS total_profit FROM anposten;`;
-        } else {
-          sql = `SELECT TOP 100 Datum FROM auftrag ORDER BY Datum DESC;`;
-        }
+      const isValidSql = !!sql && /^(SELECT|WITH)/i.test(sql);
+      if (!isValidSql) {
+        console.log(
+          `[VALIDATE][FALLBACK_TRIGGERED] requestId=${requestId}`,
+          `intent=${intent}`
+        );
+        const fallbackTable =
+          tablesForPrompt[0] || intentTableDefaults.search[0];
+        sql = buildFallbackSQL(intent, fallbackTable, schemaMap);
       }
 
-      console.log(`[VALIDATE][FINAL_SQL]`, sql);
+      console.log(`[VALIDATE][FINAL_SQL] requestId=${requestId}`, sql);
 
-      // -----------------------------------------
-      // 10. RESPONSE
-      // -----------------------------------------
       return res.json({
         success: true,
         requestId,
-        query,
+        query: trimmedQuery,
         intent,
-        tablesUsed: allowedTables,
+        tablesUsed: tablesForPrompt,
         generatedSQL: sql,
       });
     } catch (err) {
-      console.error(`[VALIDATE][ERROR]`, err);
+      console.error(`[VALIDATE][ERROR] requestId=${requestId}`, err);
 
       return res.status(500).json({
         error: 'VALIDATION_ERROR',

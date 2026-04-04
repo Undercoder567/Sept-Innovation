@@ -1013,14 +1013,14 @@ router.post(
     const requestId = (req as any).id;
 
     try {
-      const { query } = req.body;
+      const { query,language } = req.body;
       const trimmedQuery = typeof query === 'string' ? query.trim() : '';
 
       if (!trimmedQuery) {
         return res.status(400).json({ error: 'INVALID_REQUEST', message: 'Query is required', requestId });
       }
 
-      console.log(`[VALIDATE][START] requestId=${requestId} query="${trimmedQuery}"`);
+      console.log(`[VALIDATE][START] requestId=${requestId} query="${trimmedQuery} , language=${language}"`);
 
       const intent = detectIntent(trimmedQuery);
       console.log(`[VALIDATE][INTENT] requestId=${requestId} intent=${intent}`);

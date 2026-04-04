@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import Joi from 'joi';
+import { v4 as uuidv4 } from 'uuid';
 import { generateToken } from '../security/authMiddleware';
+import { dbClient } from './analytics.controller';
 
 interface DevUser {
   password: string;
@@ -45,7 +47,7 @@ const loginSchema = Joi.object({
 
 const router = Router();
 
-router.post('/login', (req: Request, res: Response) => {
+router.post('/login', async (req: Request, res: Response) => {
   const { error, value } = loginSchema.validate(req.body);
   if (error) {
     res.status(400).json({
@@ -69,17 +71,38 @@ router.post('/login', (req: Request, res: Response) => {
     return;
   }
 
+  const sessionId = uuidv4();
+
+  try {
+    await dbClient.query(
+      `
+      INSERT INTO user_sessions (session_id, user_id, ip_address, user_agent, is_active)
+      VALUES ($1, $2, $3, $4, 1);
+      `,
+      [
+        sessionId,
+        candidate.userId,
+        req.ip,
+        req.headers['user-agent'] ?? '',
+      ]
+    );
+  } catch (error) {
+    console.warn('Failed to record session', error);
+  }
+
   const token = generateToken({
     userId: candidate.userId,
     username: candidate.username,
     roles: candidate.roles,
     permissions: candidate.permissions,
     departmentId: candidate.departmentId,
+    sessionId,
   });
 
   res.status(200).json({
     success: true,
     token,
+    sessionId,
     user: {
       userId: candidate.userId,
       username: candidate.username,

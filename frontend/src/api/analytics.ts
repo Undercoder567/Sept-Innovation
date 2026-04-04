@@ -552,3 +552,9 @@ export async function authenticate(
     throw error;
   }
 }
+
+export async function logoutSession(): Promise<void> {
+  await apiCall<{ success: boolean }>("/analytics/logout-session", {
+    method: "POST",
+  });
+}

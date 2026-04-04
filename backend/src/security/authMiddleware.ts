@@ -8,6 +8,7 @@ interface TokenPayload {
   roles: string[];
   permissions: string[];
   departmentId?: string;
+  sessionId?: string;
   iat?: number;
   exp?: number;
 }

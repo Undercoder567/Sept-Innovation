@@ -15,7 +15,7 @@ dotenv.config();
 
 const llmClient = new LLMClient();
 
-const dbClient = new DatabaseClient({
+export const dbClient = new DatabaseClient({
   host: process.env.DB_HOST || 'localhost',
   port: parseInt(process.env.DB_PORT || '1433', 10),
   database: process.env.DB_NAME || 'ERP42test',
@@ -248,10 +248,11 @@ router.get('/chart/:metric', async (req: Request, res: Response) => {
     switch (metric) {
       case 'revenue':
         query = `
-          SELECT TOP 30 metric_date AS date, value
-          FROM financial_metrics
-          WHERE metric_type = 'REVENUE'
-          ORDER BY metric_date DESC;
+          SELECT TOP 30 CAST(Datum AS DATE) AS date, SUM(Summe) AS value
+FROM rechnung
+WHERE Summe IS NOT NULL
+GROUP BY CAST(Datum AS DATE)
+ORDER BY date DESC;
         `;
         break;
       case 'queries':
@@ -305,6 +306,9 @@ router.get('/chart/:metric', async (req: Request, res: Response) => {
 });
 router.post('/query', requirePermission('analytics:query:read'), async (req: Request, res: Response) => {
   const requestId = (req as any).id;
+  let submittedQuery = '';
+  let sql = '';
+  let start = 0;
 
   try {
     const { query } = req.body;
@@ -317,7 +321,8 @@ router.post('/query', requirePermission('analytics:query:read'), async (req: Req
       });
     }
 
-    const sql = query.trim();
+    submittedQuery = query;
+    sql = query.trim();
 
     // optional basic safety (can remove if you want 100% raw)
     if (!/^(SELECT|WITH)\b/i.test(sql)) {
@@ -329,12 +334,19 @@ router.post('/query', requirePermission('analytics:query:read'), async (req: Req
     }
     console.log(`[QUERY][SQL]`, sql);
 
-    const start = Date.now();
-
+    start = Date.now();
     const result = await dbClient.query(sql);
-
     const duration = Date.now() - start;
 
+
+    await logQueryHistory({
+      userId: (req as any).user?.userId ?? 'anonymous',
+      originalQuery: submittedQuery,
+      generatedSql: sql,
+      executionTime: duration,
+      recordCount: result.rows.length,
+      success: true,
+    });
 
     return res.status(200).json({
       success: true,
@@ -350,6 +362,16 @@ router.post('/query', requirePermission('analytics:query:read'), async (req: Req
 
   } catch (error) {
     console.error(`[QUERY][ERROR] requestId=${requestId}`, error);
+
+    await logQueryHistory({
+      userId: (req as any).user?.userId ?? 'anonymous',
+      originalQuery: submittedQuery,
+      generatedSql: sql,
+      executionTime: start ? Date.now() - start : 0,
+      recordCount: 0,
+      success: false,
+      errorMessage: (error as Error).message,
+    });
 
     return res.status(500).json({
       error: 'QUERY_ERROR',
@@ -388,21 +410,51 @@ router.get(
 
       return res.json({
         success: true,
-        data: {
-          totalQueries: totalQueries.rows[0].count,
-          activeSessions: activeSessions.rows[0].count,
-          avgQueryTime: Math.round(avgQueryTime.rows[0].avg || 0),
-          successRate: successRate.rows[0].rate || 0,
-        },
-      });
-    } catch (error) {
-      return res.status(500).json({
-        error: 'INSIGHTS_ERROR',
-        message: (error as Error).message,
+      data: {
+        totalQueries: totalQueries.rows[0].count,
+        activeSessions: activeSessions.rows[0].count,
+        avgQueryTime: Math.round(avgQueryTime.rows[0].avg || 0),
+        successRate: successRate.rows[0].rate || 0,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'INSIGHTS_ERROR',
+      message: (error as Error).message,
+    });
+  }
+}
+);
+
+router.post('/logout-session', async (req: Request, res: Response) => {
+  try {
+    const sessionId = (req as any).user?.sessionId;
+    if (!sessionId) {
+      return res.status(400).json({
+        error: 'MISSING_SESSION',
+        message: 'Session identifier is missing',
+        requestId: (req as any).id,
       });
     }
+
+    await dbClient.query(
+      `
+      UPDATE user_sessions
+      SET is_active = 0, logout_time = SYSUTCDATETIME()
+      WHERE session_id = $1;
+      `,
+      [sessionId]
+    );
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('[LOGOUT][ERROR]', error);
+    return res.status(500).json({
+      error: 'LOGOUT_ERROR',
+      message: (error as Error).message,
+    });
   }
-);
+});
 /**
  * Natural Language → SQL Route
  * Database: ERP42test (SQL Server / T-SQL)
@@ -916,6 +968,43 @@ function buildPrompt(intent: Intent, query: string, schemaForPrompt: string): st
 // ─────────────────────────────────────────────────────────────
 
 const TABLE_PROMPT_LIMIT = 5;
+
+async function logQueryHistory(params: {
+  userId: string;
+  originalQuery: string;
+  generatedSql: string;
+  executionTime: number;
+  recordCount: number;
+  success: boolean;
+  errorMessage?: string;
+}): Promise<void> {
+  try {
+    await dbClient.query(
+      `
+      INSERT INTO query_history (
+        user_id,
+        original_query,
+        generated_sql,
+        execution_time,
+        record_count,
+        success,
+        error_message
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7);
+      `,
+      [
+        params.userId,
+        params.originalQuery,
+        params.generatedSql,
+        params.executionTime,
+        params.recordCount,
+        params.success ? 1 : 0,
+        params.errorMessage ?? null,
+      ]
+    );
+  } catch (error) {
+    console.warn('Failed to log query history', error);
+  }
+}
 
 router.post(
   '/validate',

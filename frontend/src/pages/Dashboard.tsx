@@ -1,13 +1,13 @@
 // Dashboard.tsx — Main page (Tailwind v4 + dark/light)
 import React, { useState, useEffect } from "react";
-import { LayoutDashboard, RefreshCw, Bell, Sun, Moon } from "lucide-react";
+import { LayoutDashboard, RefreshCw, Bell, Sun, Moon, LogOut } from "lucide-react";
 import InsightCard from "../components/InsightCard";
 import ChartRenderer from "../components/ChartRenderer";
 import SqlViewer from "../components/SqlViewer";
 import ChatBox from "../components/ChatBox";
 import TableUsagePanel from "../components/TableUsagePanel";
 import TableRelationshipExplorer from "../components/TableRelationshipExplorer";
-import { fetchInsights } from "../api/analytics";
+import { fetchInsights, logoutSession, clearAuthToken } from "../api/analytics";
 import type { InsightData } from "../api/analytics";
 import { useTheme } from "../ThemeContent";
 
@@ -23,6 +23,17 @@ const Dashboard: React.FC = () => {
   const loadInsights = () => {
     setLoadingInsights(true);
     fetchInsights().then((d) => { setInsights(d); setLoadingInsights(false); setLastRefresh(new Date()); });
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logoutSession();
+    } catch (error) {
+      console.error("Logout failed:", error);
+    } finally {
+      clearAuthToken();
+      window.location.reload();
+    }
   };
 
   useEffect(() => { loadInsights(); }, []);
@@ -70,6 +81,7 @@ const Dashboard: React.FC = () => {
           </span>
           {iconBtn("Refresh", loadInsights, <RefreshCw size={14} />)}
           {iconBtn("Notifications", () => {}, <Bell size={14} />)}
+          {iconBtn("Logout", handleLogout, <LogOut size={14} />)}
 
           {/* Theme Toggle */}
           <button onClick={toggle}

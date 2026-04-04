@@ -34,3 +34,11 @@
 {"timestamp":"2026-04-04T09:48:05.438Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNK5GAF25YI28V"}
 {"timestamp":"2026-04-04T09:50:34.090Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNK5JH4A63XK28"}
 {"timestamp":"2026-04-04T10:01:27.731Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNK5XHGZDMJTWD"}
+{"timestamp":"2026-04-04T10:09:32.718Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNK67VOUKUL4B4"}
+{"timestamp":"2026-04-04T10:12:17.956Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNK6BF6TE4JG1E"}
+{"timestamp":"2026-04-04T10:17:29.062Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNK6I38MSWU5K8"}
+{"timestamp":"2026-04-04T10:18:53.577Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNK6JWG9EUBXQJ"}
+{"timestamp":"2026-04-04T10:29:58.967Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNK6Y5VCSJM9CK"}
+{"timestamp":"2026-04-04T10:30:07.191Z","action":"HTTP_REQUEST","userId":"ANONYMOUS","resource":"POST /api/analytics/analytics/logout-session","details":{"statusCode":404,"duration":2,"contentLength":150},"severity":"WARNING","id":"AUD_MNK6YC7RA1A8N2"}
+{"timestamp":"2026-04-04T10:30:33.475Z","action":"HTTP_REQUEST","userId":"ANONYMOUS","resource":"POST /api/analytics/analytics/logout-session","details":{"statusCode":404,"duration":1,"contentLength":150},"severity":"WARNING","id":"AUD_MNK6YWHVIGTCE2"}
+{"timestamp":"2026-04-04T10:37:22.804Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNK77OC5EMHU82"}

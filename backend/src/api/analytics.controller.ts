@@ -556,15 +556,6 @@ const JOIN_RULES = `JOINS (use exactly these, never guess):
   reposten -> artbest  : reposten.Artikelnum = artbest.Artikelnum
   bestatus -> auftrag  : bestatus.Belegid = auftrag.Auftragid`;
 
-const SEMANTIC_HINTS = `COLUMN SEMANTICS:
-  customer name search  -> kunde.Name LIKE '%X%'
-  order date filter     -> YEAR(auftrag.Datum) = 2024
-  product search        -> anposten.Bezeichnun LIKE '%Y%'
-  profit (order)        -> auftrag.Rohgesamt or SUM(anposten.Rohgewinn)
-  profit (invoice)      -> rechnung.Rohgesamt or SUM(reposten.Rohgewinn)
-  maintenance           -> liefer WHERE Wartung = 'J'
-  contact duration      -> DATEDIFF(minute, kontakt.Uhrzeit, kontakt.Bis)`;
-
 // ─────────────────────────────────────────────────────────────
 // INTENT DETECTION
 // ─────────────────────────────────────────────────────────────
@@ -622,6 +613,35 @@ function detectTablesFromQuery(query: string): string[] {
   return [...found];
 }
 
+function isValidSQL(sql: string): boolean {
+  if (!sql) return false;
+
+  const s = sql.trim().toUpperCase();
+
+  // must start with SELECT or WITH
+  if (!/^(SELECT|WITH)\b/.test(s)) return false;
+
+  // reject obvious garbage
+  const invalidPatterns = [
+    /RULES/i,
+    /JOINS/i,
+    /SCHEMA/i,
+    /READ USER/i,
+    /USE ONLY/i,
+    /DO NOT/i,
+    /\bONLY\b/, // your bug source
+    /\bQUESTION\b/,
+  ];
+
+  for (const pattern of invalidPatterns) {
+    if (pattern.test(sql)) return false;
+  }
+
+  // must contain FROM
+  if (!/\bFROM\b/i.test(sql)) return false;
+
+  return true;
+}
 // ─────────────────────────────────────────────────────────────
 // FALLBACK SQL — schema-aware, no bad column guesses
 // ─────────────────────────────────────────────────────────────
@@ -697,7 +717,7 @@ function tryDirectMatch(query: string): string | null {
   //          "find orders for Dieckmann"
 
   const orderCustomerMatch = q.match(
-    /\b(orders?|auftr[äa]ge?)\b.{0,40}\b(of|for|von|f[üu]r|customer|kunde)\b\s+([A-Za-zÄÖÜäöüß\-]+)(?:.{0,20}\b(20\d{2})\b)?/i
+    /\b(orders?|auftr[äa]ge?)\b.{0,40}\b(of|for|von|f[üu]r|customer|kunde)\b\s+([A-Za-zÄÖÜäöüß-]+)(?:.{0,20}\b(20\d{2})\b)?/i
   );
   if (orderCustomerMatch) {
     const name = orderCustomerMatch[3].trim();
@@ -707,7 +727,7 @@ function tryDirectMatch(query: string): string | null {
   }
 
   const invoiceCustomerMatch = q.match(
-    /\b(invoices?|rechnungen?)\b.{0,40}\b(of|for|von|f[üu]r|customer|kunde)\b\s+([A-Za-zÄÖÜäöüß\-]+)(?:.{0,20}\b(20\d{2})\b)?/i
+    /\b(invoices?|rechnungen?)\b.{0,40}\b(of|for|von|f[üu]r|customer|kunde)\b\s+([A-Za-zÄÖÜäöüß-]+)(?:.{0,20}\b(20\d{2})\b)?/i
   );
   if (invoiceCustomerMatch) {
     const name = invoiceCustomerMatch[3].trim();
@@ -722,7 +742,7 @@ function tryDirectMatch(query: string): string | null {
   //          "berechne Gewinn für Artikel Y in 2024"
 
   const profitProductMatch = q.match(
-    /\b(profit|gewinn|rohgewinn|revenue|umsatz|earnings?|ertrag)\b.{0,50}\b(with|for|f[üu]r|von|product|software|artikel|item)\s+([A-Za-zÄÖÜäöüß0-9\s\-]+?)(?:\s+in\s+(20\d{2}))?\s*$/i
+    /\b(profit|gewinn|rohgewinn|revenue|umsatz|earnings?|ertrag)\b.{0,50}\b(with|for|f[üu]r|von|product|software|artikel|item)\s+([A-Za-zÄÖÜäöüß0-9\s-]+?)(?:\s+in\s+(20\d{2}))?\s*$/i
   );
   if (profitProductMatch) {
     const product = profitProductMatch[3].trim();
@@ -746,7 +766,7 @@ function tryDirectMatch(query: string): string | null {
   //          "Wartungsintervall für Firma Müller"
 
   const maintenanceMatch = q.match(
-    /\b(maintenance|wartung|interval|intervall)\b.{0,50}\b(company|firma|customer|kunde|at|bei|f[üu]r)\b\s+([A-Za-zÄÖÜäöüß0-9\s\-]+?)\s*$/i
+    /\b(maintenance|wartung|interval|intervall)\b.{0,50}\b(company|firma|customer|kunde|at|bei|f[üu]r)\b\s+([A-Za-zÄÖÜäöüß0-9\s-]+?)\s*$/i
   );
   if (maintenanceMatch) {
     const company = maintenanceMatch[3].trim();
@@ -760,38 +780,35 @@ function tryDirectMatch(query: string): string | null {
 // ─────────────────────────────────────────────────────────────
 // SQL EXTRACTION
 // ─────────────────────────────────────────────────────────────
-
 function extractSQL(raw: string): string {
   if (!raw?.trim()) return '';
 
   let text = raw
     .replace(/\r\n/g, '\n')
     .replace(/```sql\s*/gi, '')
-    .replace(/```\s*/g, '')
-    // Remove any line that looks like LLM commentary
-    .replace(/^.*?(here'?s?|the query|sql:|answer:|note:|this query|the above|-- english|-- german).*$/gim, '')
+    .replace(/```/g, '')
     .trim();
 
-  // Find first SELECT or WITH
-  const startMatch = text.match(/(SELECT|WITH)\b/i);
-  if (!startMatch || startMatch.index === undefined) return '';
-  text = text.slice(startMatch.index);
+  // remove everything before SELECT/WITH
+  const match = text.match(/(SELECT|WITH)[\s\S]*/i);
+  if (!match) return '';
 
-  // Truncate at first semicolon
-  const semiIdx = text.indexOf(';');
-  if (semiIdx !== -1) text = text.slice(0, semiIdx + 1);
+  text = match[0];
 
-  // Remove SQL comments
+  // cut after first semicolon
+  const semi = text.indexOf(';');
+  if (semi !== -1) text = text.slice(0, semi + 1);
+
+  // remove comments
   text = text
-    .replace(/--[^\n]*/g, '')
+    .replace(/--.*$/gm, '')
     .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/\n{3,}/g, '\n')
     .trim();
 
-  if (text && !text.endsWith(';')) text += ';';
-
-  // Final safety: reject if it still contains hallucinated EXAMPLE text
+  // reject placeholders
   if (/LIKE\s+'%X%'/i.test(text) || /LIKE\s+'%Y%'/i.test(text)) return '';
+
+  if (!text.endsWith(';')) text += ';';
 
   return text;
 }
@@ -848,6 +865,9 @@ function sanitizeSQL(sql: string): string {
   s = s.trim();
   if (s && !s.endsWith(';')) s += ';';
 
+  // REMOVE accidental numbered lines like "1. Read ..."
+   s = s.replace(/\n?\s*\d+\.\s+[^\n]+/g, '');
+
   return s;
 }
 
@@ -856,55 +876,38 @@ function sanitizeSQL(sql: string): string {
 // PROMPT BUILDER
 // ─────────────────────────────────────────────────────────────
 
-const INTENT_INSTRUCTIONS: Record<Intent, string> = {
-  search:  'SELECT with WHERE/JOIN to filter records. TOP 100. LIKE with % for names. YEAR() for year filters.',
-  math:    'SELECT with SUM/AVG/COUNT. Use Rohgewinn for profit, Betrag/Summe for revenue.',
-  stats:   'SELECT with AVG/MIN/MAX/DATEDIFF stats. Maintenance: liefer.Wartung = \'J\'.',
-  unknown: 'SELECT that best answers the question.',
-};
-
-const INTENT_EXAMPLES: Record<Intent, string> = {
-  search: `-- Q: find all orders of customer Dieckmann from 2024
-SELECT TOP 100 a.Nummer, a.Datum, a.Name, a.Summe
-FROM auftrag a
-JOIN kunde k ON a.Kundennumm = k.Kundennumm
-WHERE k.Name LIKE '%Dieckmann%' AND YEAR(a.Datum) = 2024
-ORDER BY a.Datum DESC;`,
-
-  math: `-- Q: total profit for Software Pro in 2025
-SELECT SUM(ap.Rohgewinn) AS total_profit, SUM(ap.Betrag) AS total_revenue
-FROM anposten ap
-WHERE ap.Bezeichnun LIKE '%Software Pro%' AND YEAR(ap.Datum) = 2025;`,
-
-  stats: `-- Q: maintenance interval for company Acme
-SELECT kd.Name, COUNT(*) AS visits, AVG(DATEDIFF(day, l.Datum, l.Lieferdatu)) AS avg_days
-FROM liefer l
-JOIN kunde kd ON l.Kundennumm = kd.Kundennumm
-WHERE kd.Name LIKE '%Acme%' AND l.Wartung = 'J'
-GROUP BY kd.Name;`,
-
-  unknown: `-- Q: show records
-SELECT TOP 100 * FROM auftrag ORDER BY Datum DESC;`,
-};
 
 function buildPrompt(intent: Intent, query: string, schemaForPrompt: string): string {
   return [
-    '-- T-SQL. Output ONE query only. No explanation. No examples. No markdown.',
-    `-- TASK: ${INTENT_INSTRUCTIONS[intent]}`,
+    'You are a SQL generator for SQL Server (T-SQL).',
+    'Return ONLY ONE valid SQL query.',
+    'Do NOT explain. Do NOT add text.',
     '',
+
+    '-- RULES:',
+    '1. Read User Question carefully to understand intent.',
+    '2. Use ONLY tables and columns from SCHEMA.',
+    '3. Use ONLY given JOIN conditions.',
+    '4. Use TOP 100 for SELECT unless aggregation.',
+    '5. Use LIKE \'%text%\' for names.',
+    '6. Use YEAR(date_column) for year filters.',
+    '7. If unsure, return simple SELECT from main table.',
+    '8. Never use placeholders like X or Y. Always use real values from the question.',
+    '',
+
+    '-- JOINS:',
     JOIN_RULES,
     '',
-    SEMANTIC_HINTS,
-    '',
+
     '-- SCHEMA:',
     schemaForPrompt,
     '',
-    '-- EXAMPLE OUTPUT FORMAT:',
-    INTENT_EXAMPLES[intent],
+
+    '-- QUESTION:',
+    query,
     '',
-    `-- QUESTION: ${query}`,
-    '-- OUTPUT (one SQL query, nothing else):',
-    'SELECT',
+
+    '-- SQL:',
   ].join('\n');
 }
 
@@ -989,13 +992,36 @@ router.post(
       // Model continues from "SELECT" (prompt ends with it)
       const rawWithPrefix = /^\s*(SELECT|WITH)\b/i.test(raw) ? raw : 'SELECT ' + raw;
       let sql = extractSQL(rawWithPrefix);
-      const isValidSQL = /^(SELECT|WITH)\b/i.test(sql) && sql.length > 15;
+
+// ALWAYS sanitize
+sql = sanitizeSQL(sql);
+
+// STRICT validation
+const valid = isValidSQL(sql);
 
       // ── STEP 4: Fallback if LLM failed ────────────────────
-      if (!isValidSQL) {
-        console.warn(`[VALIDATE][FALLBACK] requestId=${requestId}`);
-        sql = buildFallbackSQL(intent, tablesForPrompt[0] ?? 'auftrag');
-      }
+      if (!valid) {
+  console.warn(`[VALIDATE][INVALID_SQL] requestId=${requestId}`);
+
+  // try direct AGAIN as safety
+  const retryDirect = tryDirectMatch(trimmedQuery);
+  if (retryDirect) {
+    sql = retryDirect;
+    return res.json({
+      success: true,
+      requestId,
+      query: trimmedQuery,
+      intent,
+      tablesUsed: detectTablesFromQuery(trimmedQuery),
+      generatedSQL: sql,
+      usedFallback: false,
+      source: 'direct-retry',
+    });
+  }
+
+  // fallback
+  sql = buildFallbackSQL(intent, tablesForPrompt[0] ?? 'auftrag');
+}
 
       console.log(`[VALIDATE][FINAL_SQL] requestId=${requestId}`, sql);
 

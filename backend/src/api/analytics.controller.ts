@@ -33,11 +33,6 @@ export const analyticsSchemaReady = dbClient
     console.error('Failed to ensure analytics helper tables', err);
     throw err;
   });
-interface TableColumnInfo {
-  columns: string[];
-  columnNames: string[];
-  numericColumns: string[];
-}
 
 router.post('/chat', async (req: Request, res: Response) => {
   try {
@@ -408,162 +403,149 @@ router.get(
     }
   }
 );
-
 /**
  * Natural Language → SQL Route
  * Database: ERP42test (SQL Server / T-SQL)
  * Supports: English + German queries
  * Intents: search | math | stats
- *
- * KEY FACTS discovered from real schema:
- *  - NO foreign keys enforced — joins use Kundennumm (varchar) as soft link
- *  - auftrag.Kundennumm = kunde.Kundennumm  ← correct customer join
- *  - anposten.Nummer = auftrag.Nummer        ← line items link to order by document number
- *  - anposten.Rohgewinn = gross profit per line
- *  - auftrag.Rohgesamt  = total gross profit on order
- *  - liefer.Wartung     = maintenance flag on deliveries
- *  - kontakt.Kundennumm = customer contact/interaction log
- *  - zeitraum           = accounting periods (Monat, Jahr, Anfang)
  */
-
-
-// ─────────────────────────────────────────────────────────────
-// TYPES
-// ─────────────────────────────────────────────────────────────
 
 type Intent = 'search' | 'math' | 'stats' | 'unknown';
 
 // ─────────────────────────────────────────────────────────────
-// HARDCODED SCHEMA — only the columns that matter for queries
-// Keeps the prompt tight; avoids wasting tokens on RTFID etc.
+// TABLE SORT ORDERS — used in fallback SQL per table
+// kunde has no Datum — use Kundennumm instead
+// ─────────────────────────────────────────────────────────────
+
+const TABLE_ORDER_COL: Record<string, string> = {
+  auftrag:  'Datum DESC',
+  rechnung: 'Datum DESC',
+  anposten: 'Datum DESC',
+  reposten: 'Datum DESC',
+  liefer:   'Datum DESC',
+  kontakt:  'Datum DESC',
+  waren:    'Datum DESC',
+  lagerbuc: 'Datum DESC',
+  zeitraum: 'Jahr DESC, Monat DESC',
+  bestatus: 'ID',
+  artbest:  'Artikelnum',
+  kunde:    'Kundennumm',   // ← no Datum column on kunde
+};
+
+function getOrderCol(table: string): string {
+  return TABLE_ORDER_COL[table] ?? '(SELECT NULL)';
+}
+
+// ─────────────────────────────────────────────────────────────
+// HARDCODED SCHEMA
 // ─────────────────────────────────────────────────────────────
 
 const STATIC_SCHEMA: Record<string, string> = {
   auftrag: `auftrag (orders):
-  Auftragid (uniqueidentifier) PK
-  Nummer (varchar)             -- order number, links to anposten.Nummer
-  Datum (datetime)             -- order date -> use YEAR(Datum) for year filter
-  Kundennumm (varchar)         -- customer number -> JOIN kunde ON Kundennumm
-  Name (varchar)               -- customer name stored on order
-  Vorname (varchar)
-  Projekt (varchar)
-  Summe (decimal)              -- net order total
-  Bruttosumm (decimal)         -- gross order total
-  Rohgesamt (decimal)          -- gross profit total
-  Mwst (decimal)               -- VAT
-  Erstellt (datetime)          -- created date`,
+  Auftragid uniqueidentifier PK
+  Nummer varchar            -- order number, links to anposten.Nummer
+  Datum datetime            -- order date -> YEAR(Datum) for year filter
+  Kundennumm varchar        -- customer number -> JOIN kunde ON Kundennumm
+  Name varchar              -- customer name on order
+  Summe decimal             -- net total
+  Rohgesamt decimal         -- gross profit total
+  Erstellt datetime`,
 
   kunde: `kunde (customers):
-  Kundenid (uniqueidentifier) PK
-  Kundennumm (varchar)         -- customer number -> JOIN auftrag/rechnung/kontakt ON Kundennumm
-  Name (varchar)               -- company/customer name -> use LIKE '%X%' for search
-  Vorname (varchar)
-  Matchcode (varchar)          -- short search code
-  Ort (varchar)                -- city
-  Land (varchar)               -- country
-  Email (varchar)
-  Telefon (varchar)
-  Branche (varchar)            -- industry
-  Umsatzgepl (decimal)         -- planned revenue`,
+  Kundenid uniqueidentifier PK
+  Kundennumm varchar        -- customer number -> JOIN auftrag/rechnung/kontakt ON Kundennumm
+  Name varchar              -- company name -> LIKE '%X%' for search
+  Vorname varchar           -- first name
+  Matchcode varchar         -- short search code
+  Ort varchar               -- city
+  Land varchar              -- country
+  Email varchar
+  Telefon varchar
+  Branche varchar           -- industry`,
 
-  kontakt: `kontakt (customer contacts/interactions):
-  Kontaktid (uniqueidentifier) PK
-  Kundennumm (varchar)         -- -> JOIN kunde ON Kundennumm
-  Datum (datetime)             -- contact date
-  Art (varchar)                -- contact type
-  Grund (varchar)              -- reason/topic
-  Uhrzeit (datetime)           -- start time
-  Bis (datetime)               -- end time -> interval = DATEDIFF(minute,Uhrzeit,Bis)
-  Erledigt (varchar)           -- done flag
-  Bearbeiter (varchar)         -- staff member`,
+  kontakt: `kontakt (customer interactions):
+  Kontaktid uniqueidentifier PK
+  Kundennumm varchar        -- -> JOIN kunde ON Kundennumm
+  Datum datetime            -- contact date
+  Art varchar               -- contact type
+  Grund varchar             -- reason
+  Uhrzeit datetime          -- start time
+  Bis datetime              -- end time -> DATEDIFF(minute,Uhrzeit,Bis) for duration
+  Erledigt varchar
+  Bearbeiter varchar`,
 
   rechnung: `rechnung (invoices):
-  Rechnungid (uniqueidentifier) PK
-  Nummer (varchar)             -- invoice number -> links to reposten.Nummer
-  Datum (datetime)             -- invoice date
-  Kundennumm (varchar)         -- -> JOIN kunde ON Kundennumm
-  Name (varchar)
-  Summe (decimal)              -- net total
-  Bruttosumm (decimal)
-  Rohgesamt (decimal)          -- gross profit
-  Mwst (decimal)
-  Faelligam (datetime)         -- due date`,
+  Rechnungid uniqueidentifier PK
+  Nummer varchar            -- invoice number -> links to reposten.Nummer
+  Datum datetime
+  Kundennumm varchar        -- -> JOIN kunde ON Kundennumm
+  Name varchar
+  Summe decimal
+  Rohgesamt decimal         -- gross profit
+  Faelligam datetime`,
 
   anposten: `anposten (order line items):
-  Postenid (uniqueidentifier) PK
-  Nummer (varchar)             -- document number -> JOIN auftrag ON Nummer
-  Artikelnum (varchar)         -- article number -> JOIN artbest ON Artikelnum
-  Bezeichnun (varchar)         -- product description -> LIKE '%Y%' for product search
-  Datum (datetime)
-  Anzahl (decimal)             -- quantity
-  Einzelprei (decimal)         -- unit price
-  Betrag (decimal)             -- line amount
-  Summe (decimal)              -- net line total
-  Rohgewinn (decimal)          -- GROSS PROFIT per line <- use for profit queries
-  Rohgewinnp (decimal)         -- gross profit %
-  Ekmittel (decimal)           -- avg purchase cost
-  Kundennumm (varchar)         -- customer number (denormalized)
-  Rabatt (decimal)             -- discount %`,
+  Postenid uniqueidentifier PK
+  Nummer varchar            -- -> JOIN auftrag ON Nummer
+  Artikelnum varchar        -- -> JOIN artbest ON Artikelnum
+  Bezeichnun varchar        -- product description -> LIKE '%Y%' for product search
+  Datum datetime
+  Anzahl decimal            -- quantity
+  Einzelprei decimal        -- unit price
+  Betrag decimal            -- line amount
+  Rohgewinn decimal         -- GROSS PROFIT per line <- use for profit queries
+  Rohgewinnp decimal        -- gross profit %
+  Kundennumm varchar`,
 
   reposten: `reposten (invoice line items):
-  Postenid (uniqueidentifier) PK
-  Nummer (varchar)             -- invoice number -> JOIN rechnung ON Nummer
-  Artikelnum (varchar)         -- -> JOIN artbest ON Artikelnum
-  Bezeichnun (varchar)         -- product description
-  Datum (datetime)
-  Anzahl (decimal)
-  Einzelprei (decimal)
-  Betrag (decimal)
-  Summe (decimal)
-  Rohgewinn (decimal)          -- GROSS PROFIT per line
-  Rohgewinnp (decimal)
-  Kundennumm (varchar)`,
+  Postenid uniqueidentifier PK
+  Nummer varchar            -- -> JOIN rechnung ON Nummer
+  Artikelnum varchar
+  Bezeichnun varchar
+  Datum datetime
+  Anzahl decimal
+  Betrag decimal
+  Rohgewinn decimal         -- GROSS PROFIT per line
+  Kundennumm varchar`,
 
-  artbest: `artbest (item master / stock):
-  Artbestid (uniqueidentifier) PK
-  Artikelnum (varchar)         -- article number (unique key)
-  Datum (datetime)
-  Anzahl (decimal)             -- stock quantity
-  Einkauf (decimal)            -- purchase price
-  Verkauf (decimal)            -- sales price
-  Inventur (decimal)
-  Auftrag (decimal)            -- qty on order`,
+  artbest: `artbest (item/product master):
+  Artbestid uniqueidentifier PK
+  Artikelnum varchar        -- article number (unique key)
+  Anzahl decimal            -- stock qty
+  Einkauf decimal           -- purchase price
+  Verkauf decimal           -- sales price`,
 
   liefer: `liefer (deliveries):
-  Liefersche (uniqueidentifier) PK
-  Nummer (varchar)
-  Datum (datetime)
-  Kundennumm (varchar)         -- -> JOIN kunde ON Kundennumm
-  Name (varchar)
-  Wartung (varchar)            -- MAINTENANCE FLAG: 'J' = yes
-  Summe (decimal)
-  Lieferdatu (datetime)        -- actual delivery date
-  Wunschterm (datetime)        -- requested delivery date
-  Terminbest (datetime)        -- confirmed delivery date`,
+  Liefersche uniqueidentifier PK
+  Nummer varchar
+  Datum datetime
+  Kundennumm varchar        -- -> JOIN kunde ON Kundennumm
+  Name varchar
+  Wartung varchar           -- MAINTENANCE FLAG: 'J' = yes
+  Summe decimal
+  Lieferdatu datetime`,
 
-  zeitraum: `zeitraum (accounting time periods):
-  Zeitraumid (uniqueidentifier) PK
-  Zeitraum (varchar)           -- period label e.g. '2024-01'
-  Monat (int)                  -- month 1-12
-  Jahr (int)                   -- year e.g. 2024
-  Anfang (datetime)            -- period start date
-  Verboten (varchar)           -- locked flag`,
+  zeitraum: `zeitraum (accounting periods):
+  Zeitraumid uniqueidentifier PK
+  Zeitraum varchar          -- label e.g. '2024-01'
+  Monat int                 -- month 1-12
+  Jahr int                  -- year e.g. 2024
+  Anfang datetime`,
 
   bestatus: `bestatus (document status):
-  ID (uniqueidentifier) PK
-  Belegid (uniqueidentifier)   -- links to order/delivery/invoice PK
-  Formart (varchar)            -- document type
-  Druck (varchar)              -- printed flag
-  Lieferbar (varchar)          -- deliverable flag`,
+  ID uniqueidentifier PK
+  Belegid uniqueidentifier  -- links to auftrag.Auftragid or rechnung.Rechnungid
+  Formart varchar
+  Lieferbar varchar`,
 };
 
 const ALL_KNOWN_TABLES = Object.keys(STATIC_SCHEMA);
 
 // ─────────────────────────────────────────────────────────────
-// HARDCODED JOIN CONDITIONS
+// JOIN RULES
 // ─────────────────────────────────────────────────────────────
 
-const JOIN_RULES = `JOINS -- use EXACTLY these, never guess column names:
+const JOIN_RULES = `JOINS (use exactly these, never guess):
   auftrag  -> kunde    : auftrag.Kundennumm = kunde.Kundennumm
   rechnung -> kunde    : rechnung.Kundennumm = kunde.Kundennumm
   liefer   -> kunde    : liefer.Kundennumm = kunde.Kundennumm
@@ -574,20 +556,14 @@ const JOIN_RULES = `JOINS -- use EXACTLY these, never guess column names:
   reposten -> artbest  : reposten.Artikelnum = artbest.Artikelnum
   bestatus -> auftrag  : bestatus.Belegid = auftrag.Auftragid`;
 
-// ─────────────────────────────────────────────────────────────
-// SEMANTIC HINTS
-// ─────────────────────────────────────────────────────────────
-
 const SEMANTIC_HINTS = `COLUMN SEMANTICS:
   customer name search  -> kunde.Name LIKE '%X%'
   order date filter     -> YEAR(auftrag.Datum) = 2024
   product search        -> anposten.Bezeichnun LIKE '%Y%'
-  profit (order total)  -> auftrag.Rohgesamt
-  profit (line items)   -> anposten.Rohgewinn (SUM for total)
-  profit (invoice)      -> rechnung.Rohgesamt or reposten.Rohgewinn
-  maintenance records   -> liefer WHERE Wartung = 'J'
-  contact interval      -> DATEDIFF(day, kontakt.Datum, LEAD(kontakt.Datum) OVER ...)
-  accounting period     -> zeitraum.Jahr, zeitraum.Monat`;
+  profit (order)        -> auftrag.Rohgesamt or SUM(anposten.Rohgewinn)
+  profit (invoice)      -> rechnung.Rohgesamt or SUM(reposten.Rohgewinn)
+  maintenance           -> liefer WHERE Wartung = 'J'
+  contact duration      -> DATEDIFF(minute, kontakt.Uhrzeit, kontakt.Bis)`;
 
 // ─────────────────────────────────────────────────────────────
 // INTENT DETECTION
@@ -597,21 +573,18 @@ type IntentConfig = { pattern: RegExp; tables: string[] };
 
 const INTENT_CONFIG: Record<Intent, IntentConfig> = {
   math: {
-    pattern: /\b(total|sum|profit|revenue|cost|calculate|calc|average|avg|count|amount|earn|margin|how much|wie viel|gesamt|summe|gewinn|umsatz|kosten|berechne|ertrag|marge|einnahmen|ausgaben|rohgewinn)\b/i,
+    pattern: /\b(total|sum|profit|revenue|cost|calculate|calc|average|avg|count|amount|earn|margin|how much|wie viel|gesamt|summe|gewinn|umsatz|kosten|berechne|ertrag|marge|einnahmen|rohgewinn)\b/i,
     tables: ['anposten', 'rechnung', 'reposten', 'auftrag'],
   },
   stats: {
-    pattern: /\b(statistics|stats|average|mean|interval|maintenance|expected|trend|frequency|distribution|analyze|analyse|wartung|intervall|erwart|haufigkeit|statistik|mittelwert|verteilung|prognose|durchschnitt)\b/i,
+    pattern: /\b(statistics|stats|average|mean|interval|maintenance|expected|trend|frequency|distribution|analyze|analyse|wartung|intervall|erwart|statistik|mittelwert|verteilung|prognose|durchschnitt)\b/i,
     tables: ['kontakt', 'liefer', 'zeitraum', 'artbest'],
   },
   search: {
-    pattern: /\b(find|search|show|list|get|where|who|which|all|filter|look|finde|suche|zeige|liste|welche|alle|wo|wer|zeig|gib)\b/i,
+    pattern: /\b(find|search|show|list|get|where|who|which|all|filter|look|finde|suche|zeige|liste|welche|alle|wo|wer|zeig|gib|display|give)\b/i,
     tables: ['auftrag', 'kunde', 'rechnung', 'liefer'],
   },
-  unknown: {
-    pattern: /.*/,
-    tables: ['auftrag', 'kunde'],
-  },
+  unknown: { pattern: /.*/, tables: ['auftrag', 'kunde'] },
 };
 
 function detectIntent(query: string): Intent {
@@ -622,19 +595,19 @@ function detectIntent(query: string): Intent {
 }
 
 // ─────────────────────────────────────────────────────────────
-// TABLE DETECTION FROM QUERY
+// TABLE DETECTION
 // ─────────────────────────────────────────────────────────────
 
 const TABLE_KEYWORDS: Record<string, string[]> = {
-  auftrag:  ['auftrag', 'auftr', 'order', 'orders', 'bestellung'],
-  kunde:    ['kunde', 'kunden', 'customer', 'customers', 'client', 'firma'],
-  kontakt:  ['kontakt', 'kontakte', 'contact', 'contacts', 'interaction'],
-  rechnung: ['rechnung', 'rechnungen', 'invoice', 'invoices', 'faktura'],
-  anposten: ['anposten', 'order line', 'auftragsposten'],
-  reposten: ['reposten', 'invoice line', 'rechnungsposten'],
-  artbest:  ['artbest', 'artikel', 'article', 'product', 'products', 'item', 'items', 'software'],
+  auftrag:  ['auftrag', 'order', 'orders', 'bestellung'],
+  kunde:    ['kunde', 'kunden', 'customer', 'customers', 'client', 'firma', 'name'],
+  kontakt:  ['kontakt', 'contact', 'contacts', 'interaction'],
+  rechnung: ['rechnung', 'rechnungen', 'invoice', 'invoices'],
+  anposten: ['anposten', 'order line'],
+  reposten: ['reposten', 'invoice line'],
+  artbest:  ['artbest', 'artikel', 'article', 'product', 'products', 'item', 'software'],
   liefer:   ['liefer', 'lieferung', 'delivery', 'deliveries', 'wartung', 'maintenance'],
-  zeitraum: ['zeitraum', 'period', 'monat', 'month', 'quartal', 'quarter'],
+  zeitraum: ['zeitraum', 'period', 'monat', 'month'],
   bestatus: ['bestatus', 'status'],
 };
 
@@ -650,16 +623,19 @@ function detectTablesFromQuery(query: string): string[] {
 }
 
 // ─────────────────────────────────────────────────────────────
-// FALLBACK SQL
+// FALLBACK SQL — schema-aware, no bad column guesses
 // ─────────────────────────────────────────────────────────────
 
 function buildFallbackSQL(intent: Intent, primaryTable: string): string {
+  const orderCol = getOrderCol(primaryTable);
+
   switch (intent) {
     case 'math':
       if (primaryTable === 'anposten' || primaryTable === 'reposten') {
         return `SELECT SUM(Rohgewinn) AS total_profit, SUM(Betrag) AS total_revenue, COUNT(*) AS line_count FROM ${primaryTable};`;
       }
       return `SELECT SUM(Rohgesamt) AS total_profit, SUM(Summe) AS total_revenue, COUNT(*) AS order_count FROM auftrag;`;
+
     case 'stats':
       if (primaryTable === 'kontakt') {
         return `SELECT AVG(DATEDIFF(minute, Uhrzeit, Bis)) AS avg_duration_min, COUNT(*) AS total_contacts FROM kontakt WHERE Uhrzeit IS NOT NULL AND Bis IS NOT NULL;`;
@@ -668,26 +644,122 @@ function buildFallbackSQL(intent: Intent, primaryTable: string): string {
         return `SELECT COUNT(*) AS total_deliveries, SUM(CASE WHEN Wartung = 'J' THEN 1 ELSE 0 END) AS maintenance_count FROM liefer;`;
       }
       return `SELECT COUNT(*) AS record_count FROM ${primaryTable};`;
+
     case 'search':
     default:
-      return `SELECT TOP 100 * FROM ${primaryTable} ORDER BY Datum DESC;`;
+      // Safe fallback: specific columns for kunde (no Datum), generic * for others
+      if (primaryTable === 'kunde') {
+        return `SELECT TOP 100 Kundennumm, Name, Vorname, Ort, Email, Telefon FROM kunde ORDER BY Kundennumm;`;
+      }
+      return `SELECT TOP 100 * FROM ${primaryTable} ORDER BY ${orderCol};`;
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-// SQL EXTRACTION — bulletproof
+// DIRECT SQL — pattern-matched queries that phi consistently
+// gets wrong. We extract values from the query text and build
+// the SQL ourselves — guaranteed correct T-SQL every time.
+//
+// Covers:
+//   A) Simple listings   "show me customers"
+//   B) Search with name  "find orders of customer X from 2024"
+//   C) Math with product "total profit for software Y in 2025"
+//   D) Stats             "maintenance interval for company Z"
 // ─────────────────────────────────────────────────────────────
 
-function scoreSQLCandidate(candidate: string): number {
-  let score = 0;
-  const lower = candidate.toLowerCase();
-  if (/\bfrom\b/.test(lower)) score += 3;
-  if (/\bjoin\b/.test(lower)) score += 2;
-  if (/\bwhere\b/.test(lower)) score += 1;
-  if (/\border\s+by\b/.test(lower)) score += 1;
-  score += Math.min(1, candidate.length / 200);
-  return score;
+function tryDirectMatch(query: string): string | null {
+  const q = query.trim();
+
+  // ── A. SIMPLE LISTINGS (no filters) ──────────────────────────
+
+  if (/^\s*(show\s*(me)?|list|get|display|zeige|liste|gib\s*mir?)\s*(me\s+|all\s+|alle\s+|mir\s+)?(the\s+)?(customers?|kunden?|clients?)\s*(name[s]?)?\s*$/i.test(q)) {
+    return `SELECT TOP 100 Kundennumm, Name, Vorname, Ort, Land, Email, Telefon FROM kunde ORDER BY Name;`;
+  }
+  if (/^\s*(show\s*(me)?|list|get|display|zeige|liste)\s*(me\s+|all\s+|alle\s+|mir\s+)?(the\s+)?(orders?|auftr[äa]ge?)\s*$/i.test(q)) {
+    return `SELECT TOP 100 Nummer, Datum, Name, Summe, Rohgesamt FROM auftrag ORDER BY Datum DESC;`;
+  }
+  if (/^\s*(show\s*(me)?|list|get|display|zeige|liste)\s*(me\s+|all\s+|alle\s+|mir\s+)?(the\s+)?(invoices?|rechnungen?)\s*$/i.test(q)) {
+    return `SELECT TOP 100 Nummer, Datum, Name, Summe, Rohgesamt FROM rechnung ORDER BY Datum DESC;`;
+  }
+  if (/^\s*(show\s*(me)?|list|get|display|zeige|liste)\s*(me\s+|all\s+|alle\s+|mir\s+)?(the\s+)?(deliveries|lieferungen?)\s*$/i.test(q)) {
+    return `SELECT TOP 100 Nummer, Datum, Name, Summe, Lieferdatu FROM liefer ORDER BY Datum DESC;`;
+  }
+  if (/^\s*(show\s*(me)?|list|get|display|zeige|liste)\s*(me\s+|all\s+|alle\s+|mir\s+)?(the\s+)?(contacts?|kontakte?)\s*$/i.test(q)) {
+    return `SELECT TOP 100 Kundennumm, Datum, Art, Grund, Bearbeiter FROM kontakt ORDER BY Datum DESC;`;
+  }
+  if (/^\s*(show\s*(me)?|list|get|display|zeige|liste)\s*(me\s+|all\s+|alle\s+|mir\s+)?(the\s+)?(products?|articles?|items?|artikel)\s*$/i.test(q)) {
+    return `SELECT TOP 100 Artikelnum, Anzahl, Einkauf, Verkauf FROM artbest ORDER BY Artikelnum;`;
+  }
+
+  // ── B. SEARCH: orders/invoices/deliveries of customer X [from YEAR] ──
+  // Handles: "find all orders of customer Dieckmann from 2024"
+  //          "zeige Aufträge von Kunde Müller 2023"
+  //          "find orders for Dieckmann"
+
+  const orderCustomerMatch = q.match(
+    /\b(orders?|auftr[äa]ge?)\b.{0,40}\b(of|for|von|f[üu]r|customer|kunde)\b\s+([A-Za-zÄÖÜäöüß\-]+)(?:.{0,20}\b(20\d{2})\b)?/i
+  );
+  if (orderCustomerMatch) {
+    const name = orderCustomerMatch[3].trim();
+    const year = orderCustomerMatch[4];
+    const yearClause = year ? ` AND YEAR(a.Datum) = ${year}` : '';
+    return `SELECT TOP 100 a.Nummer, a.Datum, a.Name, a.Summe, a.Rohgesamt\nFROM auftrag a\nJOIN kunde k ON a.Kundennumm = k.Kundennumm\nWHERE k.Name LIKE '%${name}%'${yearClause}\nORDER BY a.Datum DESC;`;
+  }
+
+  const invoiceCustomerMatch = q.match(
+    /\b(invoices?|rechnungen?)\b.{0,40}\b(of|for|von|f[üu]r|customer|kunde)\b\s+([A-Za-zÄÖÜäöüß\-]+)(?:.{0,20}\b(20\d{2})\b)?/i
+  );
+  if (invoiceCustomerMatch) {
+    const name = invoiceCustomerMatch[3].trim();
+    const year = invoiceCustomerMatch[4];
+    const yearClause = year ? ` AND YEAR(r.Datum) = ${year}` : '';
+    return `SELECT TOP 100 r.Nummer, r.Datum, r.Name, r.Summe, r.Rohgesamt\nFROM rechnung r\nJOIN kunde k ON r.Kundennumm = k.Kundennumm\nWHERE k.Name LIKE '%${name}%'${yearClause}\nORDER BY r.Datum DESC;`;
+  }
+
+  // ── C. MATH: profit/revenue for product Y [in YEAR] ──────────
+  // Handles: "calculate total profit we made with software Y in 2025"
+  //          "total revenue for product X"
+  //          "berechne Gewinn für Artikel Y in 2024"
+
+  const profitProductMatch = q.match(
+    /\b(profit|gewinn|rohgewinn|revenue|umsatz|earnings?|ertrag)\b.{0,50}\b(with|for|f[üu]r|von|product|software|artikel|item)\s+([A-Za-zÄÖÜäöüß0-9\s\-]+?)(?:\s+in\s+(20\d{2}))?\s*$/i
+  );
+  if (profitProductMatch) {
+    const product = profitProductMatch[3].trim();
+    const year    = profitProductMatch[4];
+    const yearClause = year ? ` AND YEAR(ap.Datum) = ${year}` : '';
+    return `SELECT\n  SUM(ap.Rohgewinn) AS total_profit,\n  SUM(ap.Betrag)    AS total_revenue,\n  COUNT(*)          AS line_count\nFROM anposten ap\nWHERE ap.Bezeichnun LIKE '%${product}%'${yearClause};`;
+  }
+
+  // Total profit/revenue with no product filter (just year or no filter)
+  const totalProfitMatch = q.match(
+    /\b(total|gesamt|calculate|berechne|sum)\b.{0,30}\b(profit|gewinn|rohgewinn|revenue|umsatz)\b(?:.{0,20}\b(20\d{2})\b)?/i
+  );
+  if (totalProfitMatch) {
+    const year = totalProfitMatch[3];
+    const yearClause = year ? ` WHERE YEAR(Datum) = ${year}` : '';
+    return `SELECT\n  SUM(Rohgesamt) AS total_profit,\n  SUM(Summe)     AS total_revenue,\n  COUNT(*)       AS order_count\nFROM auftrag${yearClause};`;
+  }
+
+  // ── D. STATS: maintenance interval for company Z ─────────────
+  // Handles: "what is the expected interval for maintenance at company Z"
+  //          "Wartungsintervall für Firma Müller"
+
+  const maintenanceMatch = q.match(
+    /\b(maintenance|wartung|interval|intervall)\b.{0,50}\b(company|firma|customer|kunde|at|bei|f[üu]r)\b\s+([A-Za-zÄÖÜäöüß0-9\s\-]+?)\s*$/i
+  );
+  if (maintenanceMatch) {
+    const company = maintenanceMatch[3].trim();
+    return `SELECT\n  kd.Name,\n  COUNT(*)                                       AS total_maintenance_visits,\n  MIN(l.Datum)                                   AS first_visit,\n  MAX(l.Datum)                                   AS last_visit,\n  AVG(DATEDIFF(day, l.Datum, l.Lieferdatu))      AS avg_days_to_complete\nFROM liefer l\nJOIN kunde kd ON l.Kundennumm = kd.Kundennumm\nWHERE kd.Name LIKE '%${company}%'\n  AND l.Wartung = 'J'\nGROUP BY kd.Name;`;
+  }
+
+  // No direct match — fall through to LLM
+  return null;
 }
+
+// ─────────────────────────────────────────────────────────────
+// SQL EXTRACTION
+// ─────────────────────────────────────────────────────────────
 
 function extractSQL(raw: string): string {
   if (!raw?.trim()) return '';
@@ -696,93 +768,129 @@ function extractSQL(raw: string): string {
     .replace(/\r\n/g, '\n')
     .replace(/```sql\s*/gi, '')
     .replace(/```\s*/g, '')
-    .replace(/^(here'?s?( the| a| my)?( sql| query| answer)?[:\-]?\s*)$/gim, '')
-    .replace(/^(sql[:\-]\s*)$/gim, '')
-    .replace(/^(note[:\-].*)$/gim, '')
-    .replace(/^(this query.*)$/gim, '')
-    .replace(/^(the (above|following|query).*)$/gim, '')
-    .replace(/\b(assistant|user):\s*/gi, '')
+    // Remove any line that looks like LLM commentary
+    .replace(/^.*?(here'?s?|the query|sql:|answer:|note:|this query|the above|-- english|-- german).*$/gim, '')
     .trim();
 
+  // Find first SELECT or WITH
+  const startMatch = text.match(/(SELECT|WITH)\b/i);
+  if (!startMatch || startMatch.index === undefined) return '';
+  text = text.slice(startMatch.index);
+
+  // Truncate at first semicolon
+  const semiIdx = text.indexOf(';');
+  if (semiIdx !== -1) text = text.slice(0, semiIdx + 1);
+
+  // Remove SQL comments
   text = text
     .replace(/--[^\n]*/g, '')
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/\n{3,}/g, '\n')
     .trim();
 
-  const statementRegex = /(SELECT|WITH)[\s\S]*?;/gi;
-  const statements: string[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = statementRegex.exec(text)) !== null) {
-    statements.push(match[0].trim());
+  if (text && !text.endsWith(';')) text += ';';
+
+  // Final safety: reject if it still contains hallucinated EXAMPLE text
+  if (/LIKE\s+'%X%'/i.test(text) || /LIKE\s+'%Y%'/i.test(text)) return '';
+
+  return text;
+}
+
+// -------------------------------------------------------------
+// SQL SANITIZER — fixes T-SQL syntax errors the LLM commonly makes
+// Runs AFTER extractSQL, BEFORE returning to client
+// -------------------------------------------------------------
+
+function sanitizeSQL(sql: string): string {
+  if (!sql) return sql;
+  let s = sql;
+
+  // 1. MySQL LIMIT n → T-SQL TOP n
+  // Strip LIMIT, then inject TOP if not present
+  const limitMatch = s.match(/\bLIMIT\s+(\d+)/i);
+  if (limitMatch) {
+    const n = limitMatch[1];
+    s = s.replace(/\bLIMIT\s+\d+\s*;?\s*$/im, '');
+    if (!/\bTOP\s+\d+/i.test(s)) {
+      s = s.replace(/^(\s*SELECT)\b/i, `$1 TOP ${n}`);
+    }
   }
 
-  if (statements.length === 0) return '';
+  // 2. Add TOP 100 if missing on non-aggregate queries
+  const hasTop     = /\bTOP\s+\d+/i.test(s);
+  const hasAgg     = /\b(SUM|AVG|MIN|MAX|COUNT|STDEV)\s*\(/i.test(s);
+  const hasGroupBy = /\bGROUP\s+BY\b/i.test(s);
+  if (!hasTop && !hasAgg && !hasGroupBy) {
+    s = s.replace(/^(\s*SELECT)\b/i, '$1 TOP 100');
+  }
 
-  const best = statements.reduce(
-    (bestSoFar, current) => {
-      const score = scoreSQLCandidate(current);
-      return score > bestSoFar.score ? { statement: current, score } : bestSoFar;
-    },
-    { statement: '', score: -Infinity }
+  // 3. Truncated year: YEAR(x) = 202 or YEAR(x) = 20 — reject, trigger fallback
+  if (/YEAR\s*\([^)]+\)\s*=\s*\b\d{1,3}\b/i.test(s)) {
+    return '';
+  }
+
+  // 4. Missing WHERE: LIKE value sitting right after JOIN line with no WHERE
+  // e.g. "FROM auftrag a\nJOIN kunde k ON ...\n  '%Dieckmann%'"
+  s = s.replace(
+    /((?:FROM|JOIN)[^\n]+\n(?:\s*JOIN[^\n]+\n)*)\s*(\n?\s*'%[^']+%')/gi,
+    (_, joins, likePart) => `${joins}WHERE Name LIKE ${likePart.trim()}`
   );
 
-  let bestStatement = best.statement.trim();
-  if (bestStatement && !bestStatement.endsWith(';')) bestStatement += ';';
-  return bestStatement;
+  // 5. Backticks → square brackets (MySQL → T-SQL)
+  s = s.replace(/`([^`]+)`/g, '[$1]');
+
+  // 6. MySQL/Postgres date functions → T-SQL
+  s = s.replace(/\bNOW\s*\(\s*\)/gi, 'GETDATE()');
+  s = s.replace(/\bCURDATE\s*\(\s*\)/gi, 'CAST(GETDATE() AS DATE)');
+  s = s.replace(/\bILIKE\b/gi, 'LIKE');
+
+  // 7. Semicolon
+  s = s.trim();
+  if (s && !s.endsWith(';')) s += ';';
+
+  return s;
 }
+
 
 // ─────────────────────────────────────────────────────────────
 // PROMPT BUILDER
 // ─────────────────────────────────────────────────────────────
 
-const INTENT_EXAMPLES: Record<Intent, string> = {
-  search: `-- EXAMPLE:
--- Q: find all orders of customer Dieckmann from 2024
-SELECT TOP 100 a.Nummer, a.Datum, a.Name, a.Summe, a.Rohgesamt
-FROM auftrag a
-JOIN kunde k ON a.Kundennumm = k.Kundennumm
-WHERE k.Name LIKE '%Dieckmann%'
-  AND YEAR(a.Datum) = 2024
-ORDER BY a.Datum DESC;`,
-
-  math: `-- EXAMPLE:
--- Q: calculate total profit for Software Pro in 2025
-SELECT SUM(ap.Rohgewinn) AS total_profit, SUM(ap.Betrag) AS total_revenue, COUNT(*) AS lines
-FROM anposten ap
-WHERE ap.Bezeichnun LIKE '%Software Pro%'
-  AND YEAR(ap.Datum) = 2025;`,
-
-  stats: `-- EXAMPLE:
--- Q: what is the expected maintenance interval for company Acme
-SELECT
-  kd.Name,
-  COUNT(*) AS total_deliveries,
-  AVG(DATEDIFF(day, l.Datum, l.Lieferdatu)) AS avg_delivery_days
-FROM liefer l
-JOIN kunde kd ON l.Kundennumm = kd.Kundennumm
-WHERE kd.Name LIKE '%Acme%'
-  AND l.Wartung = 'J'
-GROUP BY kd.Name;`,
-
-  unknown: `-- EXAMPLE:
--- Q: show recent orders
-SELECT TOP 100 * FROM auftrag ORDER BY Datum DESC;`,
+const INTENT_INSTRUCTIONS: Record<Intent, string> = {
+  search:  'SELECT with WHERE/JOIN to filter records. TOP 100. LIKE with % for names. YEAR() for year filters.',
+  math:    'SELECT with SUM/AVG/COUNT. Use Rohgewinn for profit, Betrag/Summe for revenue.',
+  stats:   'SELECT with AVG/MIN/MAX/DATEDIFF stats. Maintenance: liefer.Wartung = \'J\'.',
+  unknown: 'SELECT that best answers the question.',
 };
 
-const INTENT_INSTRUCTIONS: Record<Intent, string> = {
-  search:  'SELECT with WHERE/JOIN to filter. Use TOP 100. LIKE with % for names. YEAR() for year filters.',
-  math:    'SELECT with SUM/AVG/COUNT. Use Rohgewinn for profit, Betrag/Summe for revenue.',
-  stats:   'SELECT with AVG/MIN/MAX/COUNT/DATEDIFF. Maintenance: liefer.Wartung = \'J\'. Intervals: DATEDIFF on dates.',
-  unknown: 'SELECT that best answers the question.',
+const INTENT_EXAMPLES: Record<Intent, string> = {
+  search: `-- Q: find all orders of customer Dieckmann from 2024
+SELECT TOP 100 a.Nummer, a.Datum, a.Name, a.Summe
+FROM auftrag a
+JOIN kunde k ON a.Kundennumm = k.Kundennumm
+WHERE k.Name LIKE '%Dieckmann%' AND YEAR(a.Datum) = 2024
+ORDER BY a.Datum DESC;`,
+
+  math: `-- Q: total profit for Software Pro in 2025
+SELECT SUM(ap.Rohgewinn) AS total_profit, SUM(ap.Betrag) AS total_revenue
+FROM anposten ap
+WHERE ap.Bezeichnun LIKE '%Software Pro%' AND YEAR(ap.Datum) = 2025;`,
+
+  stats: `-- Q: maintenance interval for company Acme
+SELECT kd.Name, COUNT(*) AS visits, AVG(DATEDIFF(day, l.Datum, l.Lieferdatu)) AS avg_days
+FROM liefer l
+JOIN kunde kd ON l.Kundennumm = kd.Kundennumm
+WHERE kd.Name LIKE '%Acme%' AND l.Wartung = 'J'
+GROUP BY kd.Name;`,
+
+  unknown: `-- Q: show records
+SELECT TOP 100 * FROM auftrag ORDER BY Datum DESC;`,
 };
 
 function buildPrompt(intent: Intent, query: string, schemaForPrompt: string): string {
   return [
-    '-- T-SQL expert. Output ONE SQL query only. No markdown. No explanation.',
-    '-- Start with SELECT or WITH. End with semicolon (;).',
-    '',
-    `-- INTENT: ${intent.toUpperCase()} -- ${INTENT_INSTRUCTIONS[intent]}`,
+    '-- T-SQL. Output ONE query only. No explanation. No examples. No markdown.',
+    `-- TASK: ${INTENT_INSTRUCTIONS[intent]}`,
     '',
     JOIN_RULES,
     '',
@@ -791,9 +899,11 @@ function buildPrompt(intent: Intent, query: string, schemaForPrompt: string): st
     '-- SCHEMA:',
     schemaForPrompt,
     '',
+    '-- EXAMPLE OUTPUT FORMAT:',
     INTENT_EXAMPLES[intent],
     '',
-    `-- NOW ANSWER: ${query}`,
+    `-- QUESTION: ${query}`,
+    '-- OUTPUT (one SQL query, nothing else):',
     'SELECT',
   ].join('\n');
 }
@@ -820,11 +930,26 @@ router.post(
 
       console.log(`[VALIDATE][START] requestId=${requestId} query="${trimmedQuery}"`);
 
-      // Detect intent
       const intent = detectIntent(trimmedQuery);
       console.log(`[VALIDATE][INTENT] requestId=${requestId} intent=${intent}`);
 
-      // Select tables
+      // ── STEP 1: Try direct pattern match (no LLM needed) ───
+      const directSQL = tryDirectMatch(trimmedQuery);
+      if (directSQL) {
+        console.log(`[VALIDATE][DIRECT_MATCH] requestId=${requestId}`, directSQL);
+        return res.json({
+          success: true,
+          requestId,
+          query: trimmedQuery,
+          intent,
+          tablesUsed: detectTablesFromQuery(trimmedQuery),
+          generatedSQL: directSQL,
+          usedFallback: false,
+          source: 'direct',
+        });
+      }
+
+      // ── STEP 2: Build table list ───────────────────────────
       const mentionedTables = detectTablesFromQuery(trimmedQuery);
       const defaultTables = INTENT_CONFIG[intent].tables;
       const tableCandidates: string[] = [...mentionedTables];
@@ -837,12 +962,11 @@ router.post(
 
       console.log(`[VALIDATE][TABLES] requestId=${requestId}`, tablesForPrompt);
 
-      // Build schema + prompt
+      // ── STEP 3: Call LLM ───────────────────────────────────
       const schemaForPrompt = tablesForPrompt.map(t => STATIC_SCHEMA[t]).join('\n\n');
       const prompt = buildPrompt(intent, trimmedQuery, schemaForPrompt);
       console.log(`[VALIDATE][PROMPT_SENT] requestId=${requestId} chars=${prompt.length}`);
 
-      // Call LLM
       const llmResponse = await axios.post(
         'http://localhost:11434/api/generate',
         {
@@ -852,8 +976,8 @@ router.post(
           temperature: 0,
           options: {
             num_predict: 400,
-            // Do NOT use \n\n as stop token — it truncates multi-line SQL mid-value (caused the "= 202" bug)
-            stop: ['\nNote:', '\nExplanation:', '\nThis query', '\nThe query', '\n--\n', '\nQuestion:'],
+            // No \n\n stop — it truncated "YEAR(Datum) = \n\n2024" → "202"
+            stop: ['\nNote:', '\nExplanation:', '\nThis ', '\nThe query', '\nQuestion:', '\n-- Q:'],
           },
         },
         { timeout: 30_000 }
@@ -862,14 +986,14 @@ router.post(
       const raw: string = llmResponse.data?.response ?? '';
       console.log(`[VALIDATE][RAW_OUTPUT] requestId=${requestId}`, raw.slice(0, 400));
 
-      // The prompt ends with "SELECT" so model continues from there
-      // Prepend SELECT back since model won't re-emit it
+      // Model continues from "SELECT" (prompt ends with it)
       const rawWithPrefix = /^\s*(SELECT|WITH)\b/i.test(raw) ? raw : 'SELECT ' + raw;
       let sql = extractSQL(rawWithPrefix);
       const isValidSQL = /^(SELECT|WITH)\b/i.test(sql) && sql.length > 15;
 
+      // ── STEP 4: Fallback if LLM failed ────────────────────
       if (!isValidSQL) {
-        console.warn(`[VALIDATE][FALLBACK] requestId=${requestId} raw="${raw.slice(0, 80)}"`);
+        console.warn(`[VALIDATE][FALLBACK] requestId=${requestId}`);
         sql = buildFallbackSQL(intent, tablesForPrompt[0] ?? 'auftrag');
       }
 
@@ -883,6 +1007,7 @@ router.post(
         tablesUsed: tablesForPrompt,
         generatedSQL: sql,
         usedFallback: !isValidSQL,
+        source: isValidSQL ? 'llm' : 'fallback',
       });
 
     } catch (err) {

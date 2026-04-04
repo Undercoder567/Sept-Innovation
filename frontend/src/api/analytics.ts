@@ -401,7 +401,8 @@ export async function runSqlQuery(query: string): Promise<SqlResult> {
 
   export async function sendChat(
   _messages: ChatMessage[],
-  userMessage: string
+  userMessage: string,
+  language: string = "en"
 ): Promise<ChatMessage> {
   const requestId = crypto.randomUUID();
 
@@ -412,7 +413,7 @@ export async function runSqlQuery(query: string): Promise<SqlResult> {
     // 1. Generate SQL
     const validation = await apiCall<ValidateApiResponse>("/validate", {
       method: "POST",
-      body: JSON.stringify({ query: userMessage }),
+      body: JSON.stringify({ query: userMessage, language }),
     });
 
     console.log(`[CHAT][RAW_SQL_RESPONSE]`, validation.generatedSQL);

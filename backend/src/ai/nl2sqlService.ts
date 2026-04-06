@@ -347,7 +347,7 @@ class NL2SQLService {
       console.log('[GENERATE_SQL] LLM Response:', response);
 
       // Extract SQL from response (it might have markdown code blocks)
-      const sql = this.extractSQL(response);
+      let sql = this.extractSQL(response);
 
       console.log('[GENERATE_SQL] Extracted SQL length:', sql.length);
       console.log('[GENERATE_SQL] Extracted SQL:', sql);
@@ -355,6 +355,14 @@ class NL2SQLService {
       if (!sql || sql.trim().length === 0) {
         throw new Error('LLM returned empty SQL');
       }
+
+      // Validate and fix table names if needed
+      sql = this.validateAndFixTableNames(sql, analysis.tables);
+      console.log('[GENERATE_SQL] After table validation:', sql);
+
+      // Simplify query if it's a simple list request
+      sql = this.simplifySimpleQueries(sql, userQuery, analysis.tables);
+      console.log('[GENERATE_SQL] After simplification:', sql);
 
       return sql;
     } catch (error) {
@@ -372,23 +380,74 @@ class NL2SQLService {
     analysis: QueryAnalysis,
     maxRows: number = 100
   ): string {
-    const prompt = `SQL Server T-SQL expert. Generate ONLY the SQL query.
+    // Create strict mapping of English terms to German tables
+    const strictMappings = this.buildStrictTableMappings(analysis.tables);
+    
+    // Extract only relevant columns for the detected tables
+    const relevantColumns = this.extractRelevantColumns(analysis.tables, schemaContext);
 
-RULES:
-1. Output ONLY SQL - no markdown
-2. Use exact table/column names from schema
-3. Specify columns (no SELECT *)
-4. Use WHERE, JOIN, GROUP BY as needed
-5. TOP ${maxRows} to limit results
-6. Read-only SELECT only
+    const prompt = `You are a SQL Server T-SQL expert. Generate ONLY valid T-SQL queries.
 
-SCHEMA: ${schemaContext}
+CRITICAL RULES - YOU MUST FOLLOW THESE:
+1. Output ONLY the SQL query - NO explanations, NO descriptions, NO markdown
+2. NO text before or after SQL - just the raw SQL statement ending with semicolon
+3. ONLY use these exact German table names: ${analysis.tables.join(', ')}
+4. ONLY use these exact column names: ${relevantColumns}
+5. NO invented/hallucinated columns - use ONLY columns from the list above
+6. Add TOP ${maxRows} to limit results
+7. NO WHERE conditions with LIKE '%' - use real filters if needed
+8. Specify exact columns (not SELECT *)
+9. Read-only SELECT queries ONLY
+10. MUST end with semicolon (;)
 
-USER: "${userQuery}"
+TABLE NAMES (you MUST use these exactly):
+${strictMappings}
 
-SQL:`;
+AVAILABLE COLUMNS FOR THESE TABLES:
+${relevantColumns}
+
+DATABASE SCHEMA:
+${schemaContext}
+
+USER REQUEST: "${userQuery}"
+
+GENERATE THE T-SQL QUERY (nothing else, just SQL):
+`;
 
     return prompt;
+  }
+
+  /**
+   * Build table name mappings from detected tables
+   */
+  private buildTableMappingHints(tables: string[]): string {
+    if (tables.length === 0) return '(Auto-detect from user query)';
+
+    const hints: string[] = [];
+    for (const table of tables) {
+      hints.push(`- ${table} (German name - use exactly as shown)`);
+    }
+    return hints.join('\n');
+  }
+
+  /**
+   * Build strict table name mappings showing English to German translation
+   */
+  private buildStrictTableMappings(tables: string[]): string {
+    if (tables.length === 0) return 'N/A - No specific tables detected';
+
+    const mappings: string[] = [];
+    for (const germanTable of tables) {
+      // Find the translation for this table
+      for (const translation of tableTranslations) {
+        if (translation.germanName === germanTable) {
+          const aliases = [translation.englishAlias, ...(translation.additionalAliases || [])].filter(Boolean);
+          mappings.push(`${germanTable} (aka: ${aliases.join(', ')})`);
+          break;
+        }
+      }
+    }
+    return mappings.length > 0 ? mappings.join('\n') : 'N/A';
   }
 
   /**
@@ -466,7 +525,7 @@ SQL:`;
   }
 
   /**
-   * Extract SQL from LLM response (remove markdown code blocks)
+   * Extract SQL from LLM response (remove markdown code blocks and explanations)
    */
   private extractSQL(response: string): string {
     let sql = response.trim();
@@ -478,7 +537,176 @@ SQL:`;
     // Remove common markdown markers
     sql = sql.replace(/^#+\s+.*$/gm, '');
 
+    // Common explanation patterns that indicate end of SQL
+    const explanationPatterns = [
+      /the\s+result\s+is\s*:/i,
+      /\n\s*the\s+above\s+query/i,
+      /\n\s*this\s+query/i,
+      /\n\s*explanation\s*:/i,
+      /\n\s*note\s*:/i,
+      /here\s+is\s+the\s+sql/i,
+    ];
+
+    // Stop at first explanation pattern found
+    for (const pattern of explanationPatterns) {
+      const match = sql.search(pattern);
+      if (match !== -1) {
+        sql = sql.substring(0, match);
+      }
+    }
+
+    sql = sql.trim();
+
+    // Extract lines and filter out junk
+    const lines = sql.split('\n');
+    const sqlLines: string[] = [];
+    
+    for (const line of lines) {
+      const trimmed = line.trim();
+      
+      // Skip common non-SQL text patterns
+      if (trimmed.toLowerCase().startsWith('result') ||
+          trimmed.toLowerCase().startsWith('output') ||
+          trimmed.toLowerCase().includes('---')) {
+        break;
+      }
+      
+      // Include line if it has SQL-like content or we've already started collecting SQL
+      if (trimmed && (sqlLines.length > 0 || this.looksLikeSQLStart(trimmed))) {
+        sqlLines.push(line);
+      }
+    }
+
+    sql = sqlLines.join('\n').trim();
+
+    // Remove trailing explanation on same line after semicolon
+    const semiIndex = sql.indexOf(';');
+    if (semiIndex !== -1) {
+      sql = sql.substring(0, semiIndex + 1).trim();
+    }
+
     return sql.trim();
+  }
+
+  /**
+   * Check if a line looks like SQL start
+   */
+  private looksLikeSQLStart(line: string): boolean {
+    const sqlKeywords = ['select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'with'];
+    const lower = line.toLowerCase();
+    return sqlKeywords.some(keyword => lower.startsWith(keyword));
+  }
+
+  /**
+   * Validate and fix table names in SQL - replace English names with German if needed
+   */
+  private validateAndFixTableNames(sql: string, _expectedTables: string[]): string {
+    let fixedSQL = sql;
+
+    // Build a map of common English names to German table names
+    const englishToGerman = new Map<string, string>();
+    for (const translation of tableTranslations) {
+      if (translation.englishAlias) {
+        englishToGerman.set(translation.englishAlias.toLowerCase(), translation.germanName);
+      }
+      if (translation.additionalAliases) {
+        for (const alias of translation.additionalAliases) {
+          englishToGerman.set(alias.toLowerCase(), translation.germanName);
+        }
+      }
+    }
+
+    // Replace English table names with German equivalents
+    for (const [englishName, germanName] of englishToGerman.entries()) {
+      // Use regex to replace table names (case-insensitive, but preserve original case in replacement)
+      const regex = new RegExp(`\\b${englishName}\\b`, 'gi');
+      fixedSQL = fixedSQL.replace(regex, germanName);
+    }
+
+    console.log('[VALIDATE_TABLES] Original SQL:', sql.substring(0, 100));
+    console.log('[VALIDATE_TABLES] Fixed SQL:', fixedSQL.substring(0, 100));
+
+    return fixedSQL;
+  }
+
+  /**
+   * Extract relevant columns for tables from schema context
+   */
+  private extractRelevantColumns(tables: string[], schemaContext: string): string {
+    if (tables.length === 0) return 'See schema below';
+
+    const columns: string[] = [];
+    
+    for (const tableName of tables) {
+      // Find schema entries for this table
+      const tablePattern = new RegExp(`${tableName}:\\s*([^,]+(?:,\\s*[^:]+)*?)(?=\\s*[a-z]+:|$)`, 'i');
+      const match = schemaContext.match(tablePattern);
+      
+      if (match && match[1]) {
+        // Extract column names from schema entry
+        const columnEntries = match[1].split(',');
+        for (const entry of columnEntries.slice(0, 15)) { // Limit to first 15 columns
+          const colMatch = entry.match(/(\w+)\(/);
+          if (colMatch) {
+            columns.push(colMatch[1]);
+          }
+        }
+      }
+    }
+
+    if (columns.length === 0) {
+      return 'See schema below';
+    }
+
+    return columns.join(', ');
+  }
+
+  /**
+   * Simplify queries for common patterns like "list of X"
+   */
+  private simplifySimpleQueries(sql: string, userQuery: string, tables: string[]): string {
+    const lower = userQuery.toLowerCase();
+
+    // If it's a simple "list" request, generate a simple query
+    if ((lower.includes('list') || lower.includes('all') || lower.includes('show')) && 
+        tables.length > 0 && 
+        !lower.includes('where') && 
+        !lower.includes('filter') &&
+        !lower.includes('count') &&
+        !lower.includes('sum')) {
+      
+      console.log('[SIMPLIFY] Detected simple list request');
+      
+      const tableName = tables[0];
+      // Get key columns for this table (id, name, email, etc.)
+      const keyColumns = this.getKeyColumnsForTable(tableName);
+      
+      if (keyColumns.length > 0) {
+        const columnList = keyColumns.join(', ');
+        const simplifiedSQL = `SELECT TOP 100 ${columnList} FROM ${tableName};`;
+        console.log('[SIMPLIFY] Original SQL:', sql.substring(0, 80));
+        console.log('[SIMPLIFY] Simplified SQL:', simplifiedSQL);
+        return simplifiedSQL;
+      }
+    }
+
+    return sql;
+  }
+
+  /**
+   * Get key columns for a table (name, email, ID, etc.)
+   */
+  private getKeyColumnsForTable(tableName: string): string[] {
+    // Common key columns by table name (German names)
+    const keyColumnsByTable: Record<string, string[]> = {
+      'kunde': ['Kundennumm', 'Vorname', 'Name', 'Email', 'Erstellt'],
+      'auftrag': ['Auftragid', 'Nummer', 'Datum', 'Kundennumm', 'Summe'],
+      'rechnung': ['Rechnungid', 'Nummer', 'Datum', 'Kundennumm', 'Summe'],
+      'artikel': ['Artikelnum', 'Bezeichnung', 'Betrag'],
+      'lager': ['Lagerid', 'Artikelnum', 'Code', 'Lnummer'],
+    };
+
+    return keyColumnsByTable[tableName.toLowerCase()] || [];
   }
 
   /**

@@ -122,24 +122,35 @@ app.use(errorHandler(auditLogger));
 let server: ReturnType<typeof app.listen>;
 
 async function startServer(): Promise<void> {
-  server = app.listen(PORT, () => {
-    console.log(`🚀 Server is running on port ${PORT} in ${NODE_ENV} mode`);
-    console.log(`📊 Analytics API available at http://localhost:${PORT}/api/analytics`);
-    auditLogger.log({
-      timestamp: new Date(),
-      action: 'SERVER_START',
-      userId: 'SYSTEM',
-      resource: 'SERVER',
-      details: { port: PORT, environment: NODE_ENV },
-      severity: 'INFO',
+  console.log('[DEBUG] Starting server on port', PORT);
+  const portNum = typeof PORT === 'string' ? parseInt(PORT, 10) : PORT;
+  return new Promise((resolve) => {
+    server = app.listen(portNum, '0.0.0.0', () => {
+      console.log(`🚀 Server is running on port ${PORT} in ${NODE_ENV} mode`);
+      console.log(`📊 Analytics API available at http://localhost:${PORT}/api/analytics`);
+      auditLogger.log({
+        timestamp: new Date(),
+        action: 'SERVER_START',
+        userId: 'SYSTEM',
+        resource: 'SERVER',
+        details: { port: PORT, environment: NODE_ENV },
+        severity: 'INFO',
+      });
+      resolve();
+    });
+    
+    server.on('error', (err) => {
+      console.error('[DEBUG] Server error:', err);
     });
   });
 }
 
+console.log('[DEBUG] About to start server...');
 startServer().catch(err => {
   console.error('Failed to start server', err);
   process.exit(1);
 });
+console.log('[DEBUG] StartServer called, now waiting...');
 
 // Graceful shutdown
 process.on('SIGTERM', () => {

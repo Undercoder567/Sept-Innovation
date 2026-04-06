@@ -53,16 +53,21 @@ class LLMClient {
     baseUrl: string = process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
     model: string = process.env.OLLAMA_MODEL || 'llama2',
     embeddingModel: string = process.env.OLLAMA_EMBEDDING_MODEL || 'nomic-embed-text',
-    timeout: number = parseInt(process.env.OLLAMA_TIMEOUT_MS || '45000', 10)
+    timeout: number = parseInt(process.env.OLLAMA_TIMEOUT_MS || '120000', 10)
   ) {
     this.baseUrl = baseUrl;
     this.model = model;
     this.embeddingModel = embeddingModel;
-    this.timeout = timeout;
+    // Increase timeout for smaller models (phi, neural-chat)
+    if (model.toLowerCase() === 'phi' || model.toLowerCase() === 'neural-chat') {
+      this.timeout = Math.max(timeout, 120000); // minimum 2 minutes for small models
+    } else {
+      this.timeout = timeout;
+    }
 
     this.client = axios.create({
       baseURL: baseUrl,
-      timeout: timeout,
+      timeout: this.timeout,
       headers: {
         'Content-Type': 'application/json',
       },

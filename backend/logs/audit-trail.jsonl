@@ -44,3 +44,20 @@
 {"timestamp":"2026-04-04T10:37:22.804Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNK77OC5EMHU82"}
 {"timestamp":"2026-04-04T11:36:03.363Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNK9B4TFPZUAB3"}
 {"timestamp":"2026-04-04T11:38:22.442Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNK9E44Q45VE3M"}
+{"timestamp":"2026-04-06T07:19:00.559Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNMV09U8A34WJC"}
+{"timestamp":"2026-04-06T08:08:20.423Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNMWRPON5M2AF0"}
+{"timestamp":"2026-04-06T08:12:33.015Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNMWX4L3PTOEQL"}
+{"timestamp":"2026-04-06T08:20:20.680Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNMX75FTA346UR"}
+{"timestamp":"2026-04-06T08:28:48.047Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNMXI0XBENGGKN"}
+{"timestamp":"2026-04-06T08:30:16.377Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNMXJX2XW8IDNC"}
+{"timestamp":"2026-04-06T08:39:30.254Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNMXVSGELE5FIY"}
+{"timestamp":"2026-04-06T08:41:13.144Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNMXXZUILLUI4R"}
+{"timestamp":"2026-04-06T08:45:29.246Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNMY3HGEROTWXJ"}
+{"timestamp":"2026-04-06T09:30:30.495Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNMZPDR432UUP8"}
+{"timestamp":"2026-04-06T09:31:26.727Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNMZQL537O3EXN"}
+{"timestamp":"2026-04-06T10:05:08.447Z","action":"HTTP_REQUEST","userId":"ANONYMOUS","resource":"POST /api/analytics/analytics/nl-query","details":{"statusCode":404,"duration":5,"contentLength":144},"severity":"WARNING","id":"AUD_MNN0XX3ZDOCNTC"}
+{"timestamp":"2026-04-06T10:35:14.830Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNN20MXBDFH7QL"}
+{"timestamp":"2026-04-06T10:41:28.018Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNN28MVMGCGGXJ"}
+{"timestamp":"2026-04-06T10:43:41.294Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNN2BHPQR55RLU"}
+{"timestamp":"2026-04-06T10:45:55.305Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNN2ED4914Q1R0"}
+{"timestamp":"2026-04-06T10:50:07.061Z","action":"SERVER_START","userId":"SYSTEM","resource":"SERVER","details":{"port":"3001","environment":"development"},"severity":"INFO","id":"AUD_MNN2JRDI7XIZWJ"}

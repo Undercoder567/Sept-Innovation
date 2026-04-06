@@ -2,13 +2,13 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Send, Bot, User, Loader2, Maximize2, Minimize2, List, Settings2, Clock3 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
-import { sendChat, sendChatMessage } from "../api/analytics";
+import {  sendChatMessage, queryNaturalLanguage } from "../api/analytics";
 import type { ChatMessage } from "../api/analytics";
 import { useTheme } from "../ThemeContent";
 
 const WELCOME: ChatMessage = {
   id: "welcome", role: "assistant", timestamp: new Date(),
-  content: "Hi! I'm your analytics assistant. Ask me about revenue trends, user behaviour, or I can generate SQL queries for your data.",
+  content: "Hi! I'm your analytics assistant. You can ask me questions in two modes:\n\n🤖 Chat: Regular conversation about your data\n📊 Query: Natural language to SQL conversion\n\nTry in Query mode:\n• find all orders from 2024\n• calculate total revenue by product\n• what is the expected maintenance interval?",
 };
 const QUICK: string[] = ["what is a book?"];
 const COLORS = ["#00e5ff", "#7c3aed", "#f59e0b"];
@@ -154,11 +154,61 @@ const ChatBox: React.FC = () => {
         // normal AI chat
         reply = await sendChatMessage(messages, content);
       } else {
-        // SQL / analytics mode (backend will translate when needed)
-        reply = await sendChat(messages, content, selectedLanguage);
+        // Natural Language to SQL mode
+        const nlResponse = await queryNaturalLanguage({
+          query: content,
+          maxRows: 100,
+          allowFallback: true,
+          temperature: 0.3,
+        });
+
+        if (nlResponse.success && nlResponse.data) {
+          // Success - show results with SQL
+          reply = {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            timestamp: new Date(),
+            content: `Found ${nlResponse.data.resultCount} records in ${nlResponse.data.executionTime}ms`,
+            sqlQuery: nlResponse.data.sql,
+            chartData: nlResponse.data.results.slice(0, 5).map((row, idx) => ({
+              name: `Item ${idx + 1}`,
+              value: (Object.values(row)[0] as number) || 0,
+            })),
+          };
+
+          // Add warnings if any
+          if (nlResponse.data.warnings && nlResponse.data.warnings.length > 0) {
+            reply.content += `\n\n⚠️ Warnings: ${nlResponse.data.warnings.join(', ')}`;
+          }
+        } else {
+          // Error - show fallback suggestions
+          const error = nlResponse.error;
+          const suggestions = error?.suggestions || ['Try rephrasing your query more specifically'];
+          
+          reply = {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            timestamp: new Date(),
+            content: `❌ ${error?.message || 'Failed to generate query'}\n\n💡 Suggestions:\n${suggestions.map((s, i) => `${i + 1}. ${s}`).join('\n')}`,
+          };
+
+          // Show SQL if available even in error case
+          if (error?.details) {
+            reply.sqlQuery = JSON.stringify(error.details, null, 2);
+          }
+        }
       }
 
       setMessages((p) => [...p, reply]);
+    } catch (err) {
+      console.error("Chat error:", err);
+      const errorMsg: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        timestamp: new Date(),
+        content: `Sorry, I encountered an error: ${(err as Error).message}. Please try again or contact support.`,
+      };
+      setMessages((p) => [...p, errorMsg]);
     } finally {
       setLoading(false);
     }

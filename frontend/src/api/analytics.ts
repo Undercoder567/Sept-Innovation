@@ -81,21 +81,6 @@ interface QueryApiResponse {
   };
 }
 
-interface ValidationIssue {
-  type?: string;
-  message?: string;
-  [key: string]: unknown;
-}
-
-interface ValidateApiResponse {
-  success: boolean;
-  query: string;
-  generatedSQL: string;
-  validation?: {
-    issues?: ValidationIssue[];
-    valid?: boolean;
-  };
-}
 
 interface InsightsApiResponse {
   success: boolean;
@@ -170,25 +155,6 @@ function rowsToTable(rows: ResultRow[]): { columns: string[]; matrix: (string | 
   return { columns, matrix };
 }
 
-function cleanGeneratedSql(sql: string): string {
-  let cleanSql = sql
-    .replace(/```sql/gi, "")
-    .replace(/```/g, "")
-    .trim();
-
-  if (cleanSql.includes("ANSWER:")) {
-    cleanSql = cleanSql.split("ANSWER:")[0].trim();
-  }
-
-  return cleanSql;
-}
-
-function getValidationIssueText(issue?: ValidationIssue): string {
-  if (!issue) return "Please try rephrasing your request.";
-  if (typeof issue.message === "string" && issue.message.trim()) return issue.message;
-  if (typeof issue.type === "string" && issue.type.trim()) return issue.type;
-  return "Please try rephrasing your request.";
-}
 
 function toNumber(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -277,7 +243,7 @@ export async function fetchChartData(
       return generateChartFallback();
     }
 
-    return rows.slice(0, 12).map((row: any) => ({
+    return rows.slice(0, 12).map((row: Record<string, unknown>) => ({
       name: toLabel(row.date),
       value: Math.round(toNumber(row.value)),
     }));
@@ -343,142 +309,6 @@ export async function runSqlQuery(query: string): Promise<SqlResult> {
   }
 }
 
-/*  export async function sendChat(
-  _messages: ChatMessage[],
-  userMessage: string
-): Promise<ChatMessage> {
-  try {
-    const validation = await apiCall<ValidateApiResponse>("/validate", {
-      method: "POST",
-      body: JSON.stringify({ query: userMessage }),
-    });
-    console.log("Validation response:", JSON.stringify(validation, null, 2));
-
-    if (!validation.validation?.valid) {
-      return {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: `I couldn't understand that query. ${getValidationIssueText(
-          validation.validation?.issues?.[0]
-        )}`,
-        timestamp: new Date(),
-      };
-    }
-
-    const generatedSql = cleanGeneratedSql(validation.generatedSQL || "");
-
-    const queryResult = await apiCall<QueryApiResponse>("/query", {
-      method: "POST",
-      body: JSON.stringify({ query: generatedSql, masked: true }),
-    });
-
-    const rows = normalizeRows(queryResult.data.result);
-    const { columns, matrix } = rowsToTable(rows);
-    const rowCount = queryResult.data.metadata.recordCount ?? matrix.length;
-    const executionTime = queryResult.data.metadata.executionTime ?? 0;
-
-    const content = `Found ${rowCount} records in ${executionTime}ms.`;
-
-    return {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content,
-      timestamp: new Date(),
-      sqlQuery: generatedSql,
-      chartData: transformRowsToChart(matrix, columns),
-    };
-  } catch (error) {
-    console.error("Chat message processing failed:", error);
-
-    return {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content: `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
-      timestamp: new Date(),
-    };
-  }
-}  */
-
-  export async function sendChat(
-  _messages: ChatMessage[],
-  userMessage: string,
-  language: string = "en"
-): Promise<ChatMessage> {
-  const requestId = crypto.randomUUID();
-
-  try {
-    console.log(`[CHAT][START] requestId=${requestId}`);
-    console.log(`[CHAT][USER_QUERY]`, userMessage);
-
-    // 1. Generate SQL
-    const validation = await apiCall<ValidateApiResponse>("/validate", {
-      method: "POST",
-      body: JSON.stringify({ query: userMessage, language }),
-    });
-
-    console.log(`[CHAT][RAW_SQL_RESPONSE]`, validation.generatedSQL);
-
-    const generatedSql = cleanGeneratedSql(validation.generatedSQL || "");
-
-    console.log(`[CHAT][CLEAN_SQL]`, generatedSql);
-
-    if (!generatedSql) {
-      throw new Error("No SQL generated");
-    }
-
-    // 2. Execute SQL
-    console.log(`[CHAT][EXECUTE_SQL]`, generatedSql);
-
-    const startTime = performance.now();
-
-    const queryResult = await apiCall<QueryApiResponse>("/query", {
-      method: "POST",
-      body: JSON.stringify({ query: generatedSql, masked: true }),
-    });
-
-    const endTime = performance.now();
-
-    console.log(
-      `[CHAT][QUERY_SUCCESS] duration=${(endTime - startTime).toFixed(2)}ms`
-    );
-    console.log(
-      `[CHAT][ROW_COUNT]`,
-      queryResult.data.metadata?.recordCount
-    );
-
-    // 3. Process result
-    const rows = normalizeRows(queryResult.data.result);
-    const { columns, matrix } = rowsToTable(rows);
-
-    console.log(`[CHAT][COLUMNS]`, columns);
-    console.log(`[CHAT][FIRST_ROW]`, matrix[0]);
-
-    const rowCount =
-      queryResult.data.metadata?.recordCount ?? matrix.length;
-    const executionTime =
-      queryResult.data.metadata?.executionTime ?? 0;
-
-    return {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content: `Found ${rowCount} records in ${executionTime}ms.`,
-      timestamp: new Date(),
-      sqlQuery: generatedSql,
-      chartData: transformRowsToChart(matrix, columns),
-    };
-  } catch (error) {
-    console.error(`[CHAT][ERROR] requestId=${requestId}`, error);
-
-    return {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content: `Error: ${
-        error instanceof Error ? error.message : "Unknown error"
-      }`,
-      timestamp: new Date(),
-    };
-  }
-}
 export async function sendChatMessage(
 _messages: ChatMessage[],
 userMessage: string
@@ -515,14 +345,6 @@ return {
 }
 
 
-function transformRowsToChart(rows: (string | number | null)[][], _columns: string[]): ChartData[] {
-  if (!rows || rows.length === 0) return [];
-  return rows.slice(0, 10).map((row) => ({
-    name: String(row[0] ?? ""),
-    value: toNumber(row[1]),
-  }));
-}
-
 export function setAuthToken(token: string): void {
   localStorage.setItem("jwt_token", token);
 }
@@ -558,3 +380,111 @@ export async function logoutSession(): Promise<void> {
     method: "POST",
   });
 }
+
+// ─────────────────────────────────────────────────────────────
+// NATURAL LANGUAGE TO SQL API
+// ─────────────────────────────────────────────────────────────
+
+export interface NL2SQLRequest {
+  query: string;
+  maxRows?: number;
+  allowFallback?: boolean;
+  temperature?: number;
+}
+
+export interface NL2SQLResult {
+  query: string;
+  sql: string;
+  results: ResultRow[];
+  resultCount: number;
+  executionTime: number;
+  cached?: boolean;
+  warnings?: string[];
+}
+
+export interface NL2SQLError {
+  type: 'HALLUCINATION' | 'VALIDATION' | 'EXECUTION' | 'PARSE_ERROR' | 'SCHEMA_ERROR' | 'UNKNOWN_ERROR';
+  message: string;
+  details?: Record<string, unknown>;
+  fallbackAvailable?: boolean;
+  suggestions?: string[];
+}
+
+export interface NL2SQLResponse {
+  success: boolean;
+  data?: NL2SQLResult;
+  error?: NL2SQLError;
+}
+
+/**
+ * Convert natural language query to SQL and execute
+ * 
+ * Examples:
+ * - "find all orders of customer X from 2024"
+ * - "calculate the total profit we made with software Y in 2025"
+ * - "what is the expected interval for maintenance at company Z"
+ */
+export async function queryNaturalLanguage(
+  request: NL2SQLRequest
+): Promise<NL2SQLResponse> {
+  try {
+    const response = await apiCall<{
+      success: boolean;
+      data?: NL2SQLResult;
+      error?: NL2SQLError;
+    }>("/nl-query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+
+    return response;
+  } catch (error) {
+    console.error("NL2SQL query error:", error);
+    return {
+      success: false,
+      error: {
+        type: 'EXECUTION',
+        message: `Failed to execute query: ${(error as Error).message}`,
+        fallbackAvailable: true,
+      },
+    };
+  }
+}
+
+/**
+ * Validate a natural language query without executing
+ */
+export async function validateNaturalLanguageQuery(
+  query: string
+): Promise<{
+  success: boolean;
+  sql?: string;
+  error?: Record<string, unknown>;
+  warnings?: string[];
+}> {
+  try {
+    const response = await apiCall<{
+      success: boolean;
+      sql?: string;
+      error?: Record<string, unknown>;
+      warnings?: string[];
+    }>("/nl-query-validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+
+    return response;
+  } catch (error) {
+    console.error("NL2SQL validation error:", error);
+    return {
+      success: false,
+      error: {
+        type: 'VALIDATION',
+        message: (error as Error).message,
+      },
+    };
+  }
+}
+
